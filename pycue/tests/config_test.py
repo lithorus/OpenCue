@@ -61,7 +61,7 @@ class ConfigTests(pyfakefs.fake_filesystem_unittest.TestCase):
     def setUp(self):
         self.setUpPyfakefs()
         self.fs.add_real_file(
-            os.path.join(os.path.dirname(opencue.__file__), 'default.yaml'), read_only=True)
+            os.path.join(os.path.dirname(cueconfig.__file__), 'default.yaml'), read_only=True)
         if 'OPENCUE_CONFIG_FILE' in os.environ:
             del os.environ['OPENCUE_CONFIG_FILE']
         if 'OPENCUE_CONF' in os.environ:
