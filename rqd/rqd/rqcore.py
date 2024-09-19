@@ -516,7 +516,7 @@ class FrameAttendantThread(threading.Thread):
 
                     # Setup frame logging
                     try:
-                        self.rqlog = cuelogging.CueLogWriter(
+                        self.rqlog = cuelogging.CueLogFileWriter(
                             runFrame.log_dir_file,
                             maxLogFiles=rqd.rqconstants.MAX_LOG_FILES
                         )

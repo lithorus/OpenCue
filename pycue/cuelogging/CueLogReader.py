@@ -16,7 +16,7 @@
 
 import os
 
-class CueLogReader(object):
+class CueLogFileReader(object):
     """Class to abstract file log reading, this class tries to act as a file object"""
 
     filepath = None

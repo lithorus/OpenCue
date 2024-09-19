@@ -16,7 +16,7 @@
 """Package for reading and writing log files"""
 
 import logging
-from .CueLogReader import CueLogReader
-from .CueLogWriter import CueLogWriter
+from .CueLogReader import CueLogFileReader
+from .CueLogWriter import CueLogFileWriter
 
 log = logging.getLogger(__name__)

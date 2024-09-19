@@ -19,7 +19,7 @@ import platform
 import datetime
 import time
 
-class CueLogWriter(object):
+class CueLogFileWriter(object):
     """Class to abstract file log writing, this class tries to act as a file object"""
 
     filepath = None
