@@ -30,7 +30,7 @@ from qtpy import QtWidgets
 import yaml
 
 import opencue
-import opencue.config
+import cueconfig
 
 
 __CONFIG_FILE_ENV_VAR = 'CUEGUI_CONFIG_FILE'
@@ -66,7 +66,7 @@ def __loadConfigFromFile():
 
     if not user_config_file:
         config_file_from_user_profile = os.path.join(
-            opencue.config.config_base_directory(), __DEFAULT_CONFIG_FILE_NAME)
+            cueconfig.config_base_directory(), __DEFAULT_CONFIG_FILE_NAME)
         logger.debug('Checking for cuegui config at %s', config_file_from_user_profile)
         if os.path.exists(config_file_from_user_profile):
             user_config_file = config_file_from_user_profile

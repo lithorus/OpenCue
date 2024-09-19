@@ -14,7 +14,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""Tests for `opencue.config`."""
+"""Tests for `cueconfig`."""
 
 import os
 import unittest
@@ -22,7 +22,8 @@ import unittest
 import mock
 import pyfakefs.fake_filesystem_unittest
 
-import opencue.config
+import opencue
+import cueconfig
 
 
 EXPECTED_DEFAULT_CONFIG = {
@@ -69,20 +70,20 @@ class ConfigTests(pyfakefs.fake_filesystem_unittest.TestCase):
     @mock.patch('platform.system', new=mock.Mock(return_value='Linux'))
     @mock.patch('os.path.expanduser', new=mock.Mock(return_value='/home/username'))
     def test__should_return_config_dir_unix(self):
-        self.assertEqual('/home/username/.config/opencue', opencue.config.config_base_directory())
+        self.assertEqual('/home/username/.config/opencue', cueconfig.config_base_directory())
 
     @mock.patch('platform.system', new=mock.Mock(return_value='Windows'))
     @mock.patch(
         'os.path.expandvars', new=mock.Mock(return_value='C:/Users/username/AppData/Roaming'))
     def test__should_return_config_dir_windows(self):
         self.assertEqual(
-            'C:/Users/username/AppData/Roaming/opencue', opencue.config.config_base_directory())
+            'C:/Users/username/AppData/Roaming/opencue', cueconfig.config_base_directory())
 
     def test__should_load_default_config(self):
         self.assertIsNone(os.environ.get('OPENCUE_CONFIG_FILE'))
         self.assertIsNone(os.environ.get('OPENCUE_CONF'))
 
-        config = opencue.config.load_config_from_file()
+        config = cueconfig.load_config_from_file()
 
         self.assertEqual(EXPECTED_DEFAULT_CONFIG, config)
 
@@ -96,7 +97,7 @@ class ConfigTests(pyfakefs.fake_filesystem_unittest.TestCase):
         self.fs.create_file(config_file_path_legacy, contents='invalid yaml')
         os.environ['OPENCUE_CONF'] = config_file_path_legacy
 
-        config = opencue.config.load_config_from_file()
+        config = cueconfig.load_config_from_file()
 
         self.assertEqual('fake-facility-01', config['cuebot.facility_default'])
         self.assertEqual(['fake-cuebot-01:1234'], config['cuebot.facility']['fake-facility-01'])
@@ -112,7 +113,7 @@ class ConfigTests(pyfakefs.fake_filesystem_unittest.TestCase):
         self.fs.create_file(config_file_path, contents=USER_CONFIG)
         os.environ['OPENCUE_CONF'] = config_file_path
 
-        config = opencue.config.load_config_from_file()
+        config = cueconfig.load_config_from_file()
 
         self.assertEqual('fake-facility-01', config['cuebot.facility_default'])
         self.assertEqual(['fake-cuebot-01:1234'], config['cuebot.facility']['fake-facility-01'])
@@ -129,7 +130,7 @@ class ConfigTests(pyfakefs.fake_filesystem_unittest.TestCase):
         config_file_path = '/home/username/.config/opencue/opencue.yaml'
         self.fs.create_file(config_file_path, contents=USER_CONFIG)
 
-        config = opencue.config.load_config_from_file()
+        config = cueconfig.load_config_from_file()
 
         self.assertEqual('fake-facility-01', config['cuebot.facility_default'])
         self.assertEqual(['fake-cuebot-01:1234'], config['cuebot.facility']['fake-facility-01'])

@@ -29,7 +29,7 @@ import platform
 
 import grpc
 
-import opencue.config
+import cueconfig
 from opencue.compiled_proto import comment_pb2
 from opencue.compiled_proto import comment_pb2_grpc
 from opencue.compiled_proto import criterion_pb2
@@ -87,7 +87,7 @@ class Cuebot(object):
     RpcChannel = None
     Hosts = []
     Stubs = {}
-    Config = opencue.config.load_config_from_file()
+    Config = cueconfig.load_config_from_file()
     Timeout = Config.get('cuebot.timeout', 10000)
 
     PROTO_MAP = {
