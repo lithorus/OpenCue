@@ -22,7 +22,6 @@ import unittest
 import mock
 import pyfakefs.fake_filesystem_unittest
 
-import opencue
 import cueconfig
 
 
