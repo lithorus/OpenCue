@@ -22,7 +22,7 @@ class CueLogFileReader(object):
     filepath = None
 
     def __init__(self, filepath):
-        """CueLogWriter class initialization
+        """CueLogFileWriter class initialization
            @type    filepath: string
            @param   filepath: The filepath to log to
         """

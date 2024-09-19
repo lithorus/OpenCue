@@ -25,7 +25,7 @@ class CueLogFileWriter(object):
     filepath = None
 
     def __init__(self, filepath, maxLogFiles=1):
-        """CueLogWriter class initialization
+        """CueLogFileWriter class initialization
            @type    filepath: string
            @param   filepath: The filepath to log to
            @type    maxLogFiles: int
