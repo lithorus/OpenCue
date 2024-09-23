@@ -15,5 +15,5 @@
 
 """Package for reading and writing log files"""
 
-from .CueLogReader import CueLogFileReader
-from .CueLogWriter import CueLogFileWriter
+from .CueLogReader import *
+from .CueLogWriter import *
