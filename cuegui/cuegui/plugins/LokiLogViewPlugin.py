@@ -14,27 +14,18 @@ PRINTABLE = set(string.printable)
 class LokiLogViewWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         QtWidgets.QWidget.__init__(self, parent)
+        print("Init plugin")
         self.app = cuegui.app()
+        # print(self.app.display_log_file_content)
+        # self.app.display_log_file_content.connect(self._set_log_files)
+        self._setupUi(self)
 
+    def __del__(self):
+        print("Destruction")
 
-class LokiLogViewPlugin(cuegui.AbstractDockWidget.AbstractDockWidget):
-    """
-    Plugin for displaying the log file content from loki for the selected frame with
-    the ability to perform regex-based search.
-    """
-
-    def __init__(self, parent=None):
-        """
-        Create a LogViewPlugin instance
-
-        @param parent: The parent widget
-        @type parent: QtWidgets.QWidget or None
-        """
-        cuegui.AbstractDockWidget.AbstractDockWidget.__init__(
-            self, parent, PLUGIN_NAME, QtCore.Qt.RightDockWidgetArea)
-        self.logview_widget = LokiLogViewWidget(self)
-        self._setupUi(self.logview_widget)
-        self.layout().addWidget(self.logview_widget)
+#    def _set_log_files(self, log_files):
+#        print(log_files)
+#        pass
 
     def _setupUi(self, Form):
         """
@@ -90,3 +81,23 @@ class LokiLogViewPlugin(cuegui.AbstractDockWidget.AbstractDockWidget):
         self.nextButton.setText(_translate("Form", "Next"))
         self.findButton.setText(_translate("Form", "Find"))
         self.prevButton.setText(_translate("Form", "Prev"))
+
+class LokiLogViewPlugin(cuegui.AbstractDockWidget.AbstractDockWidget):
+    """
+    Plugin for displaying the log file content from loki for the selected frame with
+    the ability to perform regex-based search.
+    """
+
+    def __init__(self, parent=None):
+        """
+        Create a LogViewPlugin instance
+
+        @param parent: The parent widget
+        @type parent: QtWidgets.QWidget or None
+        """
+        cuegui.AbstractDockWidget.AbstractDockWidget.__init__(
+            self, parent, PLUGIN_NAME, QtCore.Qt.RightDockWidgetArea)
+        self.logview_widget = LokiLogViewWidget(self)
+
+        # self.app.display_log_file_content.connect(self._set_log_files)
+        self.layout().addWidget(self.logview_widget)
