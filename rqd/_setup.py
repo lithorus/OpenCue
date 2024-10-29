@@ -53,7 +53,6 @@ setup(
             'rqd=rqd.__main__:main'
         ]
     },
-    test_suite='tests',
     install_requires=[
         'future',
         'grpcio',
