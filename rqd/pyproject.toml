@@ -1,0 +1,20 @@
+[build-system]
+requires = [
+    "hatchling",
+    "versioningit",
+]
+build-backend = "hatchling.build"
+
+[project]
+name = "rqd"
+dynamic = ["version"]
+dependencies = [
+    'future',
+    'grpcio',
+    'grpcio-tools',
+    'psutil',
+    'pywin32; platform_system == "Windows"'
+]
+
+[tool.hatch.version]
+source = "versioningit"
