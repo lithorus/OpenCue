@@ -177,6 +177,17 @@ def deleteFacility(name):
 # Departments
 #
 @util.grpcExceptionParser
+def addDepartmentName(name):
+    """Adds a new department name.
+
+    :type  name: str
+    :param name: name of the new department
+    """
+    Cuebot.getStub('department').AddDepartmentName(
+        department_pb2.DeptAddDeptNameRequest(name=name), timeout=Cuebot.Timeout)
+
+
+@util.grpcExceptionParser
 def getDepartmentNames():
     """Return a list of the known department names.
 
