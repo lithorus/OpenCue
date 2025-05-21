@@ -32,11 +32,10 @@ import time
 
 from qtpy import QtGui
 from qtpy import QtWidgets
-import six
 
+import opencue_proto.job_pb2
 import FileSequence
 import opencue
-import opencue.compiled_proto.job_pb2
 import opencue.wrappers.depend
 
 # pylint: disable=cyclic-import
@@ -62,6 +61,8 @@ import cuegui.SubscribeToJobDialog
 import cuegui.TasksDialog
 import cuegui.UnbookDialog
 import cuegui.Utils
+
+from cuegui.cueguiplugin import loader as plugin_loader
 
 
 logger = cuegui.Logger.getLogger(__file__)
@@ -170,7 +171,7 @@ class AbstractActions(object):
 
             if not callback:
                 callback = actionName
-            if isinstance(callback, six.string_types):
+            if isinstance(callback, str):
                 callback = getattr(self, callback)
 
             action.triggered.connect(callback)  # pylint: disable=no-member
@@ -221,7 +222,49 @@ class JobActions(AbstractActions):
     """Actions for jobs."""
 
     def __init__(self, *args):
-        AbstractActions.__init__(self, *args)
+        """
+        Initialize JobActions and load associated plugins if a job source is available.
+
+        The plugin loading mechanism uses a double-callable pattern:
+        - `self._getSource` is expected to return a function
+        - that function is then called to retrieve the actual job object.
+
+        Plugins are loaded and initialized only if a valid job is retrieved.
+        """
+        super().__init__(*args)
+        self._pluginActions = []
+
+        # Attempt to retrieve the job object from the callable chain
+        source = None
+        try:
+            if callable(self._getSource):
+                maybe_func = self._getSource()
+                if callable(maybe_func):
+                    source = maybe_func()
+        except Exception as e:
+            # Optional: log if needed
+            logger.warning("Failed to resolve plugin source: %s", e)
+
+        # Load plugins only if source is valid
+        if source:
+            self._pluginActions = plugin_loader.load_plugins(job=source, parent=self._caller)
+
+    def addPluginActions(self, menu):
+        """
+        Add plugin-defined actions to the given context menu.
+
+        Args:
+            menu (QMenu): The Qt menu to which plugin actions will be appended.
+        """
+        for plugin in self._pluginActions:
+            actions = plugin.menuAction()
+            if not actions:
+                continue
+            if isinstance(actions, list):
+                for action in actions:
+                    menu.addAction(action)
+            else:
+                menu.addAction(actions)
 
     unmonitor_info = ["Unmonitor", "Unmonitor selected jobs", "eject"]
 
@@ -484,7 +527,7 @@ class JobActions(AbstractActions):
                     if not cuegui.Utils.isPermissible(job):
                         blocked_job_owners.append(job.username())
                     else:
-                        job.eatFrames(state=[opencue.compiled_proto.job_pb2.DEAD])
+                        job.eatFrames(state=[opencue_proto.job_pb2.DEAD])
                 if blocked_job_owners:
                     cuegui.Utils.showErrorMessageBox(
                         AbstractActions.USER_INTERACTION_PERMISSIONS.format(
@@ -503,7 +546,7 @@ class JobActions(AbstractActions):
                     blocked_job_owners.append(job.username())
                 else:
                     job.setAutoEat(True)
-                    job.eatFrames(state=[opencue.compiled_proto.job_pb2.DEAD])
+                    job.eatFrames(state=[opencue_proto.job_pb2.DEAD])
             if blocked_job_owners:
                 cuegui.Utils.showErrorMessageBox(
                     AbstractActions.USER_INTERACTION_PERMISSIONS.format(
@@ -544,7 +587,7 @@ class JobActions(AbstractActions):
                         blocked_job_owners.append(job.username())
                     else:
                         job.retryFrames(
-                            state=[opencue.compiled_proto.job_pb2.DEAD])
+                            state=[opencue_proto.job_pb2.DEAD])
                 if blocked_job_owners:
                     cuegui.Utils.showErrorMessageBox(
                         AbstractActions.USER_INTERACTION_PERMISSIONS.format(
@@ -619,7 +662,7 @@ class JobActions(AbstractActions):
             return
 
         body = "What order should the range %s take?" % frame_range
-        items = list(opencue.compiled_proto.job_pb2.Order.keys())
+        items = list(opencue_proto.job_pb2.Order.keys())
         (order, choice) = QtWidgets.QInputDialog.getItem(
             self._caller, title, body, sorted(items), 0, False)
         if not choice:
@@ -627,7 +670,7 @@ class JobActions(AbstractActions):
 
         self.cuebotCall(
             __job.reorderFrames, "Reorder Frames Failed",
-            frame_range, getattr(opencue.compiled_proto.job_pb2, str(order)))
+            frame_range, getattr(opencue_proto.job_pb2, str(order)))
 
     stagger_info = ["Stagger Frames...", None, "configure"]
 
@@ -964,7 +1007,7 @@ class LayerActions(AbstractActions):
             return
 
         body = "What order should the range %s take?" % frameRange
-        items = list(opencue.compiled_proto.job_pb2.Order.keys())
+        items = list(opencue_proto.job_pb2.Order.keys())
         (order, choice) = QtWidgets.QInputDialog.getItem(
             self._caller, title, body, sorted(items), 0, False)
         if not choice:
@@ -972,7 +1015,7 @@ class LayerActions(AbstractActions):
 
         for layer in layers:
             self.cuebotCall(layer.reorderFrames, "Reorder Frames Failed",
-                            frameRange, getattr(opencue.compiled_proto.job_pb2, str(order)))
+                            frameRange, getattr(opencue_proto.job_pb2, str(order)))
 
     stagger_info = ["Stagger Frames...", None, "configure"]
 
@@ -1283,7 +1326,7 @@ class FrameActions(AbstractActions):
 
         title = "Reorder %s" % __job.data.name
         body = "How should these frames be reordered?"
-        items = list(opencue.compiled_proto.job_pb2.Order.keys())
+        items = list(opencue_proto.job_pb2.Order.keys())
         (order, choice) = QtWidgets.QInputDialog.getItem(
             self._caller, title, body, sorted(items), 0, False)
         if not choice:
@@ -1305,7 +1348,7 @@ class FrameActions(AbstractActions):
                 self.cuebotCall(layerProxy.reorderFrames,
                                 "Reorder Frames Failed",
                                 str(fs),
-                                getattr(opencue.compiled_proto.job_pb2, str(order)))
+                                getattr(opencue_proto.job_pb2, str(order)))
 
     copyLogFileName_info = ["Copy log file name", None, "configure"]
 

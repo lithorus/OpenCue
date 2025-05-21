@@ -29,8 +29,8 @@ from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
 
+import opencue_proto.job_pb2
 import opencue
-import opencue.compiled_proto.job_pb2
 import opencue.wrappers.group
 
 import cuegui.AbstractTreeWidget
@@ -41,6 +41,8 @@ import cuegui.Logger
 import cuegui.MenuActions
 import cuegui.Style
 import cuegui.Utils
+
+from cuegui.cueguiplugin import loader as plugin_loader
 
 
 logger = cuegui.Logger.getLogger(__file__)
@@ -580,6 +582,36 @@ class CueJobMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
             menu.addSeparator()
             self.__menuActions.jobs().addAction(menu, "kill")
 
+            # Dynamically add plugin actions for right-clicked job(s)
+            plugins_by_type = {}
+            for job in selectedObjects:
+                for plugin in plugin_loader.load_plugins(job=job, parent=self):
+                    plugins_by_type[type(plugin)] = plugin
+
+            for plugin_type, plugin_instance in plugins_by_type.items():
+                if plugin_type.__name__ == "Plugin":
+                    # pylint: disable=protected-access
+                    label = plugin_instance._config.get("menu_label", "Unnamed Plugin")
+                    action = QtWidgets.QAction(label, self)
+
+                    def make_launch_all(ptype):
+                        def launch_all():
+                            for job in selectedObjects:
+                                plugin = ptype(job=job, parent=self)
+                                plugin.launch_subprocess()
+
+                        return launch_all
+
+                    action.triggered.connect(make_launch_all(plugin_type))
+                    menu.addSeparator()
+                    menu.addAction(action)
+                else:
+                    actions = plugin_instance.menuAction()
+                    if actions:
+                        menu.addSeparator()
+                        for action in actions:
+                            menu.addAction(action)
+
         menu.exec_(e.globalPos())
 
     def actionEatSelectedItems(self):
@@ -794,14 +826,14 @@ class JobWidgetItem(cuegui.AbstractWidgetItem.AbstractWidgetItem):
             if "FST" not in self._cache:
                 jobStats = self.rpcObject.data.job_stats
                 self._cache["FST"] = {
-                    opencue.compiled_proto.job_pb2.WAITING: jobStats.waiting_frames,
-                    opencue.compiled_proto.job_pb2.RUNNING: jobStats.running_frames,
-                    opencue.compiled_proto.job_pb2.SUCCEEDED: jobStats.succeeded_frames,
-                    opencue.compiled_proto.job_pb2.CHECKPOINT: 0,
-                    opencue.compiled_proto.job_pb2.SETUP: 0,
-                    opencue.compiled_proto.job_pb2.EATEN: jobStats.eaten_frames,
-                    opencue.compiled_proto.job_pb2.DEAD: jobStats.dead_frames,
-                    opencue.compiled_proto.job_pb2.DEPEND: jobStats.depend_frames,
+                    opencue_proto.job_pb2.WAITING: jobStats.waiting_frames,
+                    opencue_proto.job_pb2.RUNNING: jobStats.running_frames,
+                    opencue_proto.job_pb2.SUCCEEDED: jobStats.succeeded_frames,
+                    opencue_proto.job_pb2.CHECKPOINT: 0,
+                    opencue_proto.job_pb2.SETUP: 0,
+                    opencue_proto.job_pb2.EATEN: jobStats.eaten_frames,
+                    opencue_proto.job_pb2.DEAD: jobStats.dead_frames,
+                    opencue_proto.job_pb2.DEPEND: jobStats.depend_frames,
                 }
             return self._cache.get("FST", cuegui.Constants.QVARIANT_NULL)
 
