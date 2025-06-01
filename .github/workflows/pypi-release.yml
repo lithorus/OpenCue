@@ -34,4 +34,4 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
-          python3 -m twine upload --repository testpypi rqd/dist/* --verbose
+          python3 -m twine upload --repository testpypi proto/dist/* --verbose
