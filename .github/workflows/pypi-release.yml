@@ -1,7 +1,6 @@
 
 name: OpenCue Release Pipeline
 
-# Trigger this pipeline when a commit is tagged with a version number, e.g. "v0.4.32".
 on:
   push:
     tags:
