@@ -4,7 +4,7 @@ name: OpenCue Release Pipeline
 on:
   push:
     tags:
-      - "v*"
+      - "disable-v*"
 
 jobs:
   preflight:
