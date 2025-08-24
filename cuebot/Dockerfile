@@ -6,14 +6,16 @@ FROM gradle:7.6.4-jdk17 AS build
 USER gradle
 
 COPY --chown=gradle:gradle ./cuebot /home/gradle/cuebot/
-COPY --chown=gradle:gradle ./proto /home/gradle/proto/
+COPY --chown=gradle:gradle ./proto/src /home/gradle/proto/src
 
 WORKDIR /home/gradle/cuebot
 
 RUN gradle build --info --stacktrace
 
-COPY --chown=gradle:gradle VERSION.in VERSIO[N] ./
-RUN test -e VERSION || echo "$(cat VERSION.in)-custom" | tee VERSION
+ARG BUILD_ID
+
+COPY --chown=gradle:gradle VERSION.in ./
+RUN if [ -n "${BUILD_ID}" ]; then echo "${BUILD_ID}" > VERSION; else echo "$(cat VERSION.in)-custom" > VERSION; fi
 RUN mv ./build/libs/cuebot.jar ./build/libs/cuebot-$(cat ./VERSION)-all.jar
 
 
@@ -42,7 +44,7 @@ RUN chmod +x create_rpm.sh && ./create_rpm.sh cuebot "$(cat VERSION)"
 # -----------------
 # RUN
 # -----------------
-FROM openjdk:18-slim-buster
+FROM openjdk:18-slim-bullseye
 
 # Install curl for healthchecking
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*

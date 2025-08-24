@@ -28,9 +28,9 @@ from qtpy import QtGui
 from qtpy import QtWidgets
 
 import opencue
-from opencue.compiled_proto.host_pb2 import HardwareState
-from opencue.compiled_proto.host_pb2 import LockState
-from opencue.compiled_proto.host_pb2 import ThreadMode
+from opencue_proto.host_pb2 import HardwareState
+from opencue_proto.host_pb2 import LockState
+from opencue_proto.host_pb2 import ThreadMode
 
 import cuegui.AbstractTreeWidget
 import cuegui.AbstractWidgetItem
@@ -247,6 +247,19 @@ class HostMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         """Returns the proper data from the cuebot"""
         try:
             hosts = opencue.api.getHosts(**self.hostSearch.options)
+
+            # Extract OS values and update the filter list in parent
+            if hosts:
+                os_values = set(host.data.os for host in hosts if host.data.os)
+                parent = self.parent()
+                if hasattr(parent, 'updateOSFilterList'):
+                    parent.updateOSFilterList(os_values)
+
+            # Apply client-side OS filtering
+            os_filters = self.hostSearch.options.get('os_filter', [])
+            if os_filters:
+                hosts = [host for host in hosts if host.data.os in os_filters]
+
             # Sorting by name here incase that makes displaying it faster
             hosts.sort(key=lambda host: host.data.name)
             return hosts

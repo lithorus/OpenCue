@@ -23,6 +23,7 @@ from __future__ import division
 import functools
 
 from qtpy import QtCore
+from qtpy import QtGui
 from qtpy import QtWidgets
 
 from opencue.exception import EntityNotFoundException
@@ -31,6 +32,7 @@ from opencue.api import job_pb2
 import cuegui.AbstractTreeWidget
 import cuegui.AbstractWidgetItem
 import cuegui.Constants
+import cuegui.Logger
 import cuegui.MenuActions
 import cuegui.Utils
 
@@ -151,7 +153,7 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         cuegui.AbstractTreeWidget.AbstractTreeWidget.__init__(self, parent)
 
         # pylint: disable=no-member
-        self.itemSelectionChanged.connect(self.__itemSelectionChangedFilterLayer)
+        self.itemDoubleClicked.connect(self.__itemDoubleClickedFilterLayer)
         cuegui.app().select_layers.connect(self.__handle_select_layers)
 
         # Used to build right click context menus
@@ -242,14 +244,18 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         menu = QtWidgets.QMenu()
 
         self.__menuActions.layers().addAction(menu, "view")
+        self.__menuActions.layers().addAction(menu, "copyLayerName")
 
         if (len(cuegui.Constants.OUTPUT_VIEWERS) > 0
                 and sum(len(layer.getOutputPaths()) for layer in __selectedObjects) > 0):
             for viewer in cuegui.Constants.OUTPUT_VIEWERS:
-                menu.addAction(viewer['action_text'],
-                               functools.partial(cuegui.Utils.viewOutput,
-                                                 __selectedObjects,
-                                                 viewer['action_text']))
+                action = QtWidgets.QAction(QtGui.QIcon(":viewoutput.png"),
+                                           viewer['action_text'], self)
+                action.triggered.connect(
+                    functools.partial(cuegui.Utils.viewOutput,
+                                    __selectedObjects,
+                                    viewer['action_text']))
+                menu.addAction(action)
 
         depend_menu = QtWidgets.QMenu("&Dependencies", self)
         self.__menuActions.layers().addAction(depend_menu, "viewDepends")
@@ -279,10 +285,10 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
 
         menu.exec_(e.globalPos())
 
-    def __itemSelectionChangedFilterLayer(self):
-        """Filter FrameMonitor to selected Layers.
-        Emits signal to filter FrameMonitor to selected Layers.
-        Also emits signal for other widgets to select Layers.
+    def __itemDoubleClickedFilterLayer(self):
+        """Filter FrameMonitor to double-clicked Layers.
+        Emits signal to filter FrameMonitor to double-clicked Layers.
+        Also emits signal for other widgets to double-clicked Layers.
         """
         layers = self.selectedObjects()
         layer_names = [layer.data.name for layer in layers]

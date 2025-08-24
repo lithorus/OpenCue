@@ -35,7 +35,7 @@ from qtpy import QtGui
 from qtpy import QtWidgets
 
 import opencue
-from opencue.compiled_proto import job_pb2
+from opencue_proto import job_pb2
 
 import cuegui.AbstractTreeWidget
 import cuegui.AbstractWidgetItem
@@ -259,8 +259,9 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
 
         # Redrawing every even number of seconds to see the current frame
         # runtime, LLU and last log line changes. Every second was excessive.
-        if not self.ticksWithoutUpdate % 2:
-            self.redraw()
+        # Always redraw running frames regardless of update status
+        if self.__job and not self.ticksWithoutUpdate % 2:
+            self.redrawRunning()
 
     @staticmethod
     def getCores(frame, format_as_string=False):
@@ -901,6 +902,8 @@ class FrameContextMenu(QtWidgets.QMenu):
 
         self.__menuActions.frames().addAction(self, "tail")
         self.__menuActions.frames().addAction(self, "view")
+        self.__menuActions.frames().addAction(self, "copyLogPath")
+        self.__menuActions.frames().addAction(self, "copyFrameName")
 
         if count == 1:
             if widget.selectedObjects()[0].data.retry_count >= 1:
@@ -930,11 +933,14 @@ class FrameContextMenu(QtWidgets.QMenu):
 
                 if outputPaths:
                     for viewer in cuegui.Constants.OUTPUT_VIEWERS:
-                        self.addAction(viewer['action_text'],
-                                       functools.partial(cuegui.Utils.viewFramesOutput,
-                                                         job,
-                                                         selectedFrames,
-                                                         viewer['action_text']))
+                        action = QtWidgets.QAction(QtGui.QIcon(":viewoutput.png"),
+                                                   viewer['action_text'], self)
+                        action.triggered.connect(
+                            functools.partial(cuegui.Utils.viewFramesOutput,
+                                            job,
+                                            selectedFrames,
+                                            viewer['action_text']))
+                        self.addAction(action)
 
         if self.app.applicationName() == "CueCommander":
             self.__menuActions.frames().addAction(self, "viewHost")

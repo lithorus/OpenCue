@@ -53,12 +53,10 @@ from __future__ import division
 from builtins import object
 import logging
 
-import six
-
 # pylint: disable=cyclic-import
-from opencue.compiled_proto import criterion_pb2
-from opencue.compiled_proto import host_pb2
-from opencue.compiled_proto import job_pb2
+from opencue_proto import criterion_pb2
+from opencue_proto import host_pb2
+from opencue_proto import job_pb2
 import opencue.wrappers.host
 from .cuebot import Cuebot
 
@@ -352,7 +350,7 @@ def _setOptions(criteria, options):
         elif k in ("range", "frames"):
             if not v:
                 continue
-            if isinstance(criteria.frame_range, six.string_types):
+            if isinstance(criteria.frame_range, str):
                 # Once FrameSearch.frameRange is not a string
                 # this can go away
                 criteria.frame_range = v
@@ -361,7 +359,7 @@ def _setOptions(criteria, options):
         elif k == "memory":
             if not v:
                 continue
-            if isinstance(criteria.memory_range, six.string_types):
+            if isinstance(criteria.memory_range, str):
                 # Once FrameSearch.memoryRange is not a string
                 # this can go away
                 criteria.memory_range = v
@@ -381,7 +379,7 @@ def _setOptions(criteria, options):
         elif k == "duration":
             if not v:
                 continue
-            if isinstance(criteria.duration_range, six.string_types):
+            if isinstance(criteria.duration_range, str):
                 # Once FrameSearch.durationRange is not a string
                 # this can go away
                 criteria.duration_range = v
@@ -396,6 +394,9 @@ def _setOptions(criteria, options):
             criteria.first_result = int(v)
         elif k == "include_finished":
             criteria.include_finished = v
+        elif k in ("os_filter",):
+            # Client-side only options - these don't get sent to the server
+            pass
         elif len(k) == 0:
             return criteria
         else:

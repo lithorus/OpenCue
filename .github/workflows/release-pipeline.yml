@@ -7,21 +7,27 @@ on:
       - "v*"
 
 jobs:
-  preflight:
+  build_opencue_packages:
+    name: Build Python Packages
     runs-on: ubuntu-22.04
-    name: Preflight
+    container: python:3.7
+    outputs:
+      opencue_proto_path: ${{ steps.package_outputs.outputs.opencue_proto_path }}
+      opencue_rqd_path: ${{ steps.package_outputs.outputs.opencue_rqd_path }}
+      opencue_pycue_path: ${{ steps.package_outputs.outputs.opencue_pycue_path }}
+      opencue_pyoutline_path: ${{ steps.package_outputs.outputs.opencue_pyoutline_path }}
+      opencue_cueadmin_path: ${{ steps.package_outputs.outputs.opencue_cueadmin_path }}
+      opencue_cueman_path: ${{ steps.package_outputs.outputs.opencue_cueman_path }}
+      opencue_cuesubmit_path: ${{ steps.package_outputs.outputs.opencue_cuesubmit_path }}
+      opencue_cuegui_path: ${{ steps.package_outputs.outputs.opencue_cuegui_path }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          fetch-tags: true
           fetch-depth: 0
 
-      - name: Set build ID
-        run: |
-          set -e
-          ci/generate_version_number.sh > VERSION
-          echo "Build ID: $(cat ./VERSION)"
-          echo "BUILD_ID=$(cat ./VERSION)" >> ${GITHUB_ENV}
+      - name: Mark repository as safe (Fix for https://github.com/actions/checkout/issues/1048)
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
 
       - name: Get current tag name
         run: echo "TAG_NAME=${GITHUB_REF/refs\/tags\//}" >> ${GITHUB_ENV}
@@ -29,15 +35,41 @@ jobs:
       - name: Verify tag name and version match
         run: |
           set -e
-          if [ "v$(cat VERSION)" != "${TAG_NAME}" ]; then
-            echo "Version check failed: code version v$(cat VERSION) does not match tag name ${TAG_NAME}"
+          if [ "v$(ci/generate_version_number.py)" != "${TAG_NAME}" ]; then
+            echo "Version check failed: code version v$(ci/generate_version_number.py) does not match tag name ${TAG_NAME}"
             echo "Original GITHUB_REF: ${GITHUB_REF}"
             exit 1
           fi
 
-  release_docker_images:
-    needs: preflight
+      - uses: ./.github/actions/build-python-packages
+
+  upload_python_packages_test:
+    needs: build_opencue_packages
     runs-on: ubuntu-22.04
+    container: python:3.11
+    name: "Upload python packages to testpypi repo"
+    environment: testpypi
+    env:
+      TWINE_USERNAME: "__token__"
+      TWINE_PASSWORD: "${{ secrets.TEST_PYPI_API_TOKEN }}"
+      TWINE_REPOSITORY: "testpypi"
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: opencue_packages
+          path: packages
+
+      - name: Upload packages
+        run: |
+          python3 -m pip install --upgrade twine
+          python3 -m twine upload --verbose packages/opencue_*
+
+  release_docker_images:
+    # needs: preflight
+    runs-on: ubuntu-22.04
+    environment: dockerhub
     strategy:
       matrix:
         component: [cuebot, rqd, pycue, pyoutline, cuegui, cuesubmit, cueadmin]
@@ -47,14 +79,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          fetch-tags: true
           fetch-depth: 0
+
+      - name: Mark repository as safe (Fix for https://github.com/actions/checkout/issues/1048)
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
 
       - name: Set build ID
         run: |
           set -e
-          ci/generate_version_number.sh > VERSION
-          echo "Build ID: $(cat ./VERSION)"
-          echo "BUILD_ID=$(cat ./VERSION)" >> ${GITHUB_ENV}
+          echo "Build ID: $(ci/generate_version_number.py)"
+          echo "BUILD_ID=$(ci/generate_version_number.py)" >> ${GITHUB_ENV}
+
+      - name: Get current tag name
+        run: echo "TAG_NAME=${GITHUB_REF/refs\/tags\//}" >> ${GITHUB_ENV}
+
+      - name: Verify tag name and version match
+        run: |
+          set -e
+          if [ "v$(ci/generate_version_number.py)" != "${TAG_NAME}" ]; then
+            echo "Version check failed: code version v$(ci/generate_version_number.py) does not match tag name ${TAG_NAME}"
+            echo "Original GITHUB_REF: ${GITHUB_REF}"
+            exit 1
+          fi
 
       - name: Pull Docker image from staging
         run: |
@@ -86,8 +133,9 @@ jobs:
       #     readme-filepath: ./${{ matrix.component }}/README.md
 
   create_release:
-    needs: preflight
+    # needs: preflight
     name: Create Release
+    environment: dockerhub
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
@@ -108,8 +156,8 @@ jobs:
         run: |
           set -e
           ci/generate_version_number.sh > VERSION
-          echo "Build ID: $(cat ./VERSION)"
-          echo "BUILD_ID=$(cat ./VERSION)" >> ${GITHUB_ENV}
+          echo "Build ID: $(ci/generate_version_number.py)"
+          echo "BUILD_ID=$(ci/generate_version_number.py)" >> ${GITHUB_ENV}
 
       - name: Fetch artifacts
         id: fetch_artifacts
