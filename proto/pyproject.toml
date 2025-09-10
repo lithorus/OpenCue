@@ -15,7 +15,6 @@ dependencies = [
 ]
 requires-python = ">3.7"
 description = "opencue-proto is a module containing the protobuf modules for communication to and from cuebot."
-readme = "README.md"
 
 [tool.hatch.version]
 source = "code"
