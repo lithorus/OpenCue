@@ -14,18 +14,9 @@
 
 
 """Outline configuration"""
-
-
 from __future__ import print_function
 from __future__ import division
 from __future__ import absolute_import
-
-from builtins import str
-
-# pylint: disable=wrong-import-position
-from future import standard_library
-standard_library.install_aliases()
-# pylint: enable=wrong-import-position
 
 import getpass
 import logging
@@ -34,6 +25,15 @@ import pathlib
 import platform
 import tempfile
 import configparser
+
+
+from builtins import str
+
+# pylint: disable=wrong-import-position
+from future import standard_library
+standard_library.install_aliases()
+# pylint: enable=wrong-import-position
+
 
 __all__ = ['config', 'read_config_from_disk']
 __file_path__ = pathlib.Path(__file__)

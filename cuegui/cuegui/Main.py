@@ -100,7 +100,7 @@ def startup(app_name, app_version, argv):
 
     # TODO(#609) Refactor the CueGUI classes to make this garbage collector
     #   replacement unnecessary.
-    gc = cuegui.GarbageCollector.GarbageCollector(parent=app, debug=False)  # pylint: disable=unused-variable
+    cuegui.GarbageCollector.GarbageCollector(parent=app, debug=False)  # pylint: disable=unused-variable
     app.aboutToQuit.connect(closingTime)  # pylint: disable=no-member
     app.exec_()
 

@@ -312,8 +312,8 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         selecting Layers in Tree.
         Also emits signal to filter FrameMonitor
         """
-        received_layers = [l.data.name for l in layerRpcObjects]
-        current_layers = [l.data.name for l in self.selectedObjects()]
+        received_layers = [layer.data.name for layer in layerRpcObjects]
+        current_layers = [layer.data.name for layer in self.selectedObjects()]
         if received_layers == current_layers:
             # prevent recursion
             return

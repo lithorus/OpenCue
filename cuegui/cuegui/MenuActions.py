@@ -1218,7 +1218,7 @@ class FrameActions(AbstractActions):
                       for frame in frames if frame.data.last_resource})
         if hosts:
             layers = self._getSource().getLayers()
-            layer = [l for l in layers if l.data.name == frames[0].data.layer_name]
+            layer = [layer for layer in layers if layer.data.name == frames[0].data.layer_name]
 
             if len(layer) > 0:
                 job = self._getSource()

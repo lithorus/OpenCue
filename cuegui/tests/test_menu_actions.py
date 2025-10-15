@@ -493,7 +493,7 @@ class JobActionsTests(unittest.TestCase):
 
         move_dialogMock.open()
         group_name = 'arbitrary-group-name'
-        job = opencue.wrappers.job.Job(
+        opencue.wrappers.job.Job(
             opencue_proto.job_pb2.Job(
                 name='arbitrary-job-name', show='arbitrary-show-name'))
         group = opencue.wrappers.group.Group(opencue_proto.job_pb2.Group(name=group_name))

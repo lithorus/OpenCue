@@ -180,7 +180,7 @@ class GroupFilter(QtWidgets.QPushButton):
         try:
             if show:
                 return show
-        except:
+        except:  # noqa: E722
             return opencue.api.findShow(show.name())
 
     def showChanged(self, show):

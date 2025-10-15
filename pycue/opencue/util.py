@@ -72,7 +72,7 @@ def id(value):
         try:
             return item.id()
         # pylint: disable=bare-except
-        except:
+        except:  # noqa: E722
             pass
         return item
 
@@ -121,7 +121,7 @@ def rep(entity):
     try:
         return entity.name
     # pylint: disable=bare-except
-    except:
+    except:  # noqa: E722
         return str(entity)
 
 

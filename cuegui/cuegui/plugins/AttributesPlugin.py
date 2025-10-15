@@ -297,7 +297,7 @@ class LayerAttributes(AbstractAttributes):
                 rep = output.split("/")[-2]
                 if rep in d["outputs"]:
                     rep = "%s #%d" % (rep, num)
-            except:
+            except:  # noqa: E722
                 rep = "output #%d" % num
             # pylint: enable=bare-except
 
@@ -386,7 +386,7 @@ class JobAttributes(AbstractAttributes):
                         rep = output.split("/")[-2]
                         if rep in entry:
                             rep = "%s #%d" % (rep, num)
-                    except:
+                    except:  # noqa: E722
                         rep = "output #%d" % num
                     # pylint: enable=bare-except
 

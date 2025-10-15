@@ -39,7 +39,7 @@ class SpecVersiondTest(unittest.TestCase):
         layer.set_arg("timeout", 420)
         layer.set_arg("timeout_llu", 4200)
         ol.add_layer(layer)
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         l.set_flag("priority", 42)
         return Et.fromstring(l.serialize())
 
@@ -70,7 +70,7 @@ class SpecVersiondTest(unittest.TestCase):
         layer.set_arg("gpus", 4)
         layer.set_arg("gpu_memory", 8 * 1024 * 1024)
         ol.add_layer(layer)
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         return Et.fromstring(l.serialize())
 
     def test_gpu_1_11(self):
@@ -89,7 +89,7 @@ class SpecVersiondTest(unittest.TestCase):
         ol = outline.Outline(name="override_max_cores_and_gpus", maxcores=8, maxgpus=7)
         layer = outline.modules.shell.Shell("test_layer", command=["/bin/ls"])
         ol.add_layer(layer)
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         return Et.fromstring(l.serialize())
 
     def test_max_cores_gpus_1_12(self):

@@ -16,4 +16,4 @@
 outline.versions is a module for versioning external Python modules.
 """
 
-from .main import *
+from .main import *  # noqa: F403

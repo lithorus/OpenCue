@@ -356,7 +356,7 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         current_log_file = cuegui.Utils.getFrameLogFile(self.__job, item.rpcObject)
         try:
             old_log_files = sorted(glob.glob('%s.*' % current_log_file),
-                                   key=lambda l: int(l.split('rqlog.')[-1]),
+                                   key=lambda l: int(l.split('rqlog.')[-1]),  # noqa: E741
                                    reverse=True)
         except ValueError:
             old_log_files = []

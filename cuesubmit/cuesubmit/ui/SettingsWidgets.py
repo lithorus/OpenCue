@@ -332,7 +332,7 @@ def buildDynamicWidgets(parameters):
                                             max_value=option.get('max', 999),
                                             float_precision=option.get('float_precision'))
 
-        elif option['type'] == bool:
+        elif option['type'] is bool:
             widget = Widgets.CueLabelToggle(label=f'{label}:',
                                             default_value=option.get('value', False))
 
@@ -350,7 +350,7 @@ def buildDynamicWidgets(parameters):
             elif option.get('browsable') == '*':
                 widget.setFileBrowsable(fileFilter=option['value'])
 
-        elif option['type'] == str:
+        elif option['type'] is str:
             if option['value'] == '\n':
                 widget = Command.CueCommandWidget()
             else:

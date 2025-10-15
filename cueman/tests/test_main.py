@@ -52,7 +52,7 @@ except ImportError:
 
 # Add the parent directory to the path to import the module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from cueman import main  # pylint: disable=wrong-import-position
+from cueman import main  # pylint: disable=wrong-import-position  # noqa: E402
 
 
 class TestCuemanMain(unittest.TestCase):

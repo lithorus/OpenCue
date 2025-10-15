@@ -128,7 +128,7 @@ class Dispatcher(object):
         """
         try:
             while True:
-                l, f = self.__get_next_frame()
+                l, f = self.__get_next_frame()  # noqa: E741
                 if l is None and f is None:
                     break
 

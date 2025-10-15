@@ -343,7 +343,7 @@ class LogLoader(QtCore.QRunnable):
         # pylint: disable=bare-except
         try:
             content, log_mtime = self.fn(*self.args, **self.kwargs)
-        except:
+        except:  # noqa: E722
             exctype, value = sys.exc_info()[:2]
             self.signals.SIG_LOG_LOAD_ERROR.emit(
                 (exctype, value, traceback.format_exc()))

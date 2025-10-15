@@ -205,7 +205,7 @@ class LoadOutlineTest(unittest.TestCase):
 
         try:
             os.environ["OL_TAG_OVERRIDE"] = "general"
-            l = outline.cuerun.OutlineLauncher(ol)
+            l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
 
             root = Et.fromstring(l.serialize())
             self.assertEqual(os.environ["OL_TAG_OVERRIDE"],
@@ -220,7 +220,7 @@ class LoadOutlineTest(unittest.TestCase):
         for layer in ol.get_layers():
             layer.set_arg("tags", ["foo", "man", "chu"])
 
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         root = Et.fromstring(l.serialize())
         self.assertEqual("foo | man | chu",
                           root.find("job/layers/layer/tags").text)
@@ -232,7 +232,7 @@ class LoadOutlineTest(unittest.TestCase):
         for layer in ol.get_layers():
             layer.set_arg("tags", "foo | man | chu")
 
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         root = Et.fromstring(l.serialize())
         self.assertEqual("foo | man | chu",
                           root.find("job/layers/layer/tags").text)
@@ -242,7 +242,7 @@ class LoadOutlineTest(unittest.TestCase):
         Check that the os flag is handled properly.
         """
         ol = outline.load_outline(self.script)
-        l = outline.cuerun.OutlineLauncher(ol, os="awesome")
+        l = outline.cuerun.OutlineLauncher(ol, os="awesome")  # noqa: E741
 
         root = Et.fromstring(l.serialize())
         self.assertEqual("awesome",
@@ -256,7 +256,7 @@ class LoadOutlineTest(unittest.TestCase):
         try:
             os.environ["OL_OS"] = "radical"
             ol = outline.load_outline(self.script)
-            l = outline.cuerun.OutlineLauncher(ol)
+            l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
             root = Et.fromstring(l.serialize())
             self.assertEqual("radical", root.find("job/os").text)
         finally:

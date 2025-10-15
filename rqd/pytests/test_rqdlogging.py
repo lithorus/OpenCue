@@ -44,4 +44,4 @@ def test_LokiLogger_invalid_runFrame():
 
     with pytest.raises(AttributeError) as excinfo:
         LokiLogger("http://localhost:3100", rf)
-    assert excinfo.type == AttributeError
+    assert excinfo.type is AttributeError

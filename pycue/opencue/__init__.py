@@ -21,19 +21,18 @@ from __future__ import division
 import logging
 
 # pylint: disable=cyclic-import
-from .cuebot import Cuebot
-from . import api
-from . import wrappers
-from . import search
-
-from .exception import CueException
-from .exception import EntityNotFoundException
+from .cuebot import Cuebot  # noqa: F401
+from . import api  # noqa: F401
+from . import wrappers  # noqa: F401
+from . import search  # noqa: F401
+from .exception import CueException  # noqa: F401
+from .exception import EntityNotFoundException  # noqa: F401
 # pylint: disable=redefined-builtin
-from .util import id
+from .util import id  # noqa: F401
 # pylint: enable=redefined-builtin
-from .util import logPath
-from .util import proxy
-from .util import rep
+from .util import logPath  # noqa: F401
+from .util import proxy  # noqa: F401
+from .util import rep  # noqa: F401
 
 
 class __NullHandler(logging.Handler):

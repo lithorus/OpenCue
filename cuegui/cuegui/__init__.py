@@ -17,5 +17,5 @@
 See __main__.py and Main.py for the application entrypoint.
 """
 
-from .App import create_app
-from .App import app
+from .App import create_app  # noqa: F401
+from .App import app  # noqa: F401

@@ -401,7 +401,7 @@ class FrameMonitor(QtWidgets.QWidget):
         layers = self.frameMonitorTree.frameSearch.options.get('layer', [])
         for item in self._filterLayersButton.menu().actions():
             # If item is checked and not in list: remove
-            if item.isChecked() and not item.text() in layer_list:
+            if item.isChecked() and item.text() not in layer_list:
                 layers.remove(str(item.text()))
                 item.setChecked(False)
             # if item is not checked, and item is in list: add

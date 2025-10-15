@@ -156,7 +156,7 @@ def isGroup(obj):
     # isinstance is needed here due to NestedGroup's inheritance
     # pylint: disable=unidiomatic-typecheck
     return (
-        type(obj) == opencue.wrappers.group.Group or
+        type(obj) is opencue.wrappers.group.Group or
         (isinstance(obj, opencue.wrappers.group.NestedGroup) and obj.hasParent()))
 
 
@@ -444,7 +444,7 @@ def getFrameLLU(job, frame):
         # pylint: disable=bare-except
         try:
             frame.getFrameLLU = __now - os.stat(getFrameLogFile(job, frame)).st_mtime
-        except:
+        except:  # noqa: E722
             frame.getFrameLLU = 0
         frame.getFrameLLUTime = __now
     return frame.getFrameLLU

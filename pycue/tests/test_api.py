@@ -222,7 +222,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(TEST_JOB_NAME, jobs[0].name())
 
     def testRaiseExceptionOnBadCriteriaSearch(self):
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(Exception):
             opencue.api.getJobs(bad_criteria=["00000000-0000-0000-0000-012345678980"])
 
     @mock.patch('opencue.cuebot.Cuebot.getStub')

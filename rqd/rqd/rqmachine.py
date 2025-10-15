@@ -520,7 +520,7 @@ class Machine(object):
                 for line in nvidia_smi.splitlines():
                     # Example "16130 MiB, 16103 MiB, 8"
                     # 1 MiB = 1048.576 KB
-                    l = line.split()
+                    l = line.split()  # noqa: E741
                     unitTotal = math.ceil(int(l[0]) * 1048.576)
                     unitFree = math.ceil(int(l[2]) * 1048.576)
                     total += unitTotal
@@ -656,7 +656,7 @@ class Machine(object):
                         __totalCores += rqd.rqconstants.CORE_VALUE
                         if "core id" in currCore \
                                 and "physical id" in currCore \
-                                and not currCore["physical id"] in procsFound:
+                                and currCore["physical id"] not in procsFound:
                             procsFound.append(currCore["physical id"])
                             __numProcs += 1
                         elif "core id" not in currCore:

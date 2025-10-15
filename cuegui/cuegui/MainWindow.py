@@ -427,7 +427,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # pylint: disable=bare-except
         try:
             self.windows.remove(self)
-        except:
+        except:  # noqa: E722
             pass
         self.__windowMenuUpdate()
 

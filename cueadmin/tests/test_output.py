@@ -23,7 +23,6 @@ from __future__ import absolute_import, division, print_function
 # pylint: disable=wrong-import-order,wrong-import-position
 from future import standard_library
 
-standard_library.install_aliases()
 
 import contextlib
 import io
@@ -32,6 +31,7 @@ import time
 import unittest
 
 import mock
+import cueadmin.output
 import opencue.wrappers.allocation
 import opencue.wrappers.frame
 import opencue.wrappers.host
@@ -48,7 +48,7 @@ import opencue_proto.service_pb2
 import opencue_proto.show_pb2
 import opencue_proto.subscription_pb2
 
-import cueadmin.output
+standard_library.install_aliases()
 
 # pylint: disable=line-too-long
 

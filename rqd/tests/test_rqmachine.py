@@ -483,7 +483,7 @@ class MachineTests(pyfakefs.fake_filesystem_unittest.TestCase):
         # ------------------------step5-------------------------
         # Missing one core
         with self.assertRaises(rqd.rqexceptions.CoreReservationFailureException):
-            tasksets4 = self.machine.reserveHT(300)
+            self.machine.reserveHT(300)
 
 
     def test_tags(self):

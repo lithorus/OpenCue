@@ -978,7 +978,7 @@ class Layer(with_metaclass(LayerType, object)):
         """
         try:
             return self.__input[name]
-        except:
+        except:  # noqa: E722
             raise outline.exception.LayerException(
                 "An input by the name %s does not exist." % name)
 
@@ -991,7 +991,7 @@ class Layer(with_metaclass(LayerType, object)):
         """
         try:
             return self.__output[name]
-        except:
+        except:  # noqa: E722
             raise outline.exception.LayerException(
                 "An output by the name %s does not exist." % name)
 

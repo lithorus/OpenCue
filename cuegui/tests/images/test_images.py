@@ -19,9 +19,9 @@
 import unittest
 
 # pylint: disable=unused-import
-import cuegui.images.icons_rcc
-import cuegui.images.bluecurve.icons_rcc
-import cuegui.images.crystal.icons_rcc
+import cuegui.images.icons_rcc  # noqa: F401
+import cuegui.images.bluecurve.icons_rcc  # noqa: F401
+import cuegui.images.crystal.icons_rcc  # noqa: F401
 
 
 class ImagesTests(unittest.TestCase):

@@ -65,7 +65,7 @@ def systemCpuCount():
     # pylint: disable=bare-except
     try:
         return len([p for p in os.listdir("/sys/devices/system/cpu") if p.startswith("cpu")])
-    except:
+    except:  # noqa: E722
         return 1
 
 

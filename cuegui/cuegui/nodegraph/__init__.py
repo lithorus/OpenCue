@@ -18,4 +18,4 @@
 The docs for NodeGraphQt can be found at:
 http://chantasticvfx.com/nodeGraphQt/html/nodes.html
 """
-from .nodes import CueLayerNode
+from .nodes import CueLayerNode  # noqa: F401

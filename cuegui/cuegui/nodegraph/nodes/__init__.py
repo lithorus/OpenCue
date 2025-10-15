@@ -16,4 +16,4 @@
 """Module housing node implementations that work with NodeGraphQt"""
 
 
-from .layer import CueLayerNode
+from .layer import CueLayerNode  # noqa: F401

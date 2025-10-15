@@ -802,7 +802,7 @@ class JobMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
 
         # include rpcObjects from self._items that are not in rpcObjects
         for proxy, item in list(self._items.items()):
-            if not proxy in rpcObjects:
+            if proxy not in rpcObjects:
                 rpcObjects[proxy] = item.rpcObject
         # pylint: disable=too-many-nested-blocks
         try:

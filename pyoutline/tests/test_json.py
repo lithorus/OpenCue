@@ -55,7 +55,7 @@ class JsonTest(unittest.TestCase):
 
         ol.get_layer('layer_1').set_env('LAYER_KEY2', 'LAYER_VALUE2')
 
-        l = outline.cuerun.OutlineLauncher(ol)
+        l = outline.cuerun.OutlineLauncher(ol)  # noqa: E741
         root = Et.fromstring(l.serialize())
         env1 = root.find('job/layers/layer/env/key[@name="LAYER_KEY1"]')
         self.assertEqual('LAYER_VALUE1', env1.text)

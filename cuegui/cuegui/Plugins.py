@@ -266,7 +266,7 @@ class Plugins(object):
 
             for p in os.listdir(plugin_dir):
                 name, ext = os.path.splitext(p)
-                if ext == ".py" and not name in ["__init__", "Manifest", "README"]:
+                if ext == ".py" and name not in ["__init__", "Manifest", "README"]:
                     self.loadPlugin(name)
             sys.path = orig_sys_path
         else:

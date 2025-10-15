@@ -795,7 +795,6 @@ class FrameAttendantThreadTests(pyfakefs.fake_filesystem_unittest.TestCase):
         frameName = 'arbitrary-frame-name'
         frameUid = 928
         frameUsername = 'my-random-user'
-        returnCode = 0
         softLimit = 2000000000
         hardLimit = 5000000000
         renderHost = opencue_proto.report_pb2.RenderHost(name='arbitrary-host-name')

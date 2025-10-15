@@ -265,9 +265,9 @@ def _createCriterion(search, searchType, convert=None):
             isinstance(search, str) and search.isdigit():
         search = "gt%s" % search
 
-    if searchType == float:
+    if isinstance(searchType, float):
         searchTypeStr = "Float"
-    elif searchType == int:
+    elif isinstance(searchType, int):
         searchTypeStr = "Integer"
     else:
         raise ValueError("Unknown searchType, must be Int or Float")

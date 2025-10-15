@@ -66,7 +66,7 @@ class FrameEtaGenerator(object):
                 self.Svea(frame)
             elif 'arnold' in layer.data.services:
                 self.Arnold(frame)
-        except:
+        except:  # noqa: E722
             pass
         self.frame_results['time_left'] = self.time_left
         self.frame_results['total_completion'] = self.total_completion
@@ -74,7 +74,7 @@ class FrameEtaGenerator(object):
         self.frame_results['scene_build_seconds'] = self.scene_build_seconds
         try:
             self.frame_results['percent_complete'] = self.percents[0][0]
-        except:
+        except:  # noqa: E722
             self.frame_results['percent_complete'] = 0
         linecache.clearcache()
         return self.frame_results
@@ -135,7 +135,7 @@ class FrameEtaGenerator(object):
                             self.percents.append((percent, time_on_log))
                             if len(self.percents) > 1:
                                 break
-                        except:
+                        except:  # noqa: E722
                             pass
             if len(self.percents) > 1:
                 self.percents = sorted(self.percents, reverse=True)
@@ -231,7 +231,7 @@ class FrameEtaGenerator(object):
                 line[percent_location-3] + line[percent_location-2] + line[percent_location-1])
             time_on_log = self.GetSeconds(line)
             self.percents.append((percent, time_on_log))
-        except:
+        except:  # noqa: E722
             pass
 
     @staticmethod

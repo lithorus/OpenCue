@@ -21,6 +21,6 @@ FileSequence contains helper classes for representing a job's frame range.
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import division
-from .FrameRange import FrameRange
-from .FrameSet import FrameSet
-from .FileSequence import FileSequence
+from .FrameRange import FrameRange  # noqa: F401
+from .FrameSet import FrameSet  # noqa: F401
+from .FileSequence import FileSequence  # noqa: F401
