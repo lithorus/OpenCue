@@ -22,7 +22,7 @@ from typing import Optional
 
 import pystray
 from PIL import Image, ImageDraw
-from pystray import MenuItem as Item
+from pystray import MenuItem, Icon
 
 from .config import Config
 from .monitor import HostMonitor, HostState
@@ -51,10 +51,10 @@ class CueNIMBYTray:
             config: Configuration object. If None, uses default.
         """
         self.config = config or Config()
-        self.monitor: Optional[HostMonitor] = None
+        self.monitor: HostMonitor
         self.notifier: Optional[Notifier] = None
         self.scheduler: Optional[NimbyScheduler] = None
-        self.icon: Optional[pystray.Icon] = None
+        self.icon: Icon  # pyright: ignore [reportInvalidTypeForm]
 
         self._init_components()
 
@@ -255,6 +255,7 @@ class CueNIMBYTray:
             about_message = f"CueNIMBY v{__version__}\n\nOpenCue NIMBY Control\n\nHost: {self.monitor.hostname}"
             print(f"\nAbout CueNIMBY\n{about_message}\n")
 
+    # pylint: disable=unused-argument
     def _open_config(self, icon, item) -> None:
         """Open config file in default editor."""
         config_path = str(self.config.config_path)
@@ -274,6 +275,7 @@ class CueNIMBYTray:
                     f"Failed to open config file: {e}"
                 )
 
+    # pylint: disable=unused-argument
     def _quit(self, icon, item) -> None:
         """Quit application."""
         logger.info("Shutting down CueNIMBY")
@@ -287,25 +289,25 @@ class CueNIMBYTray:
             pystray.Menu object.
         """
         return pystray.Menu(
-            Item(
+            MenuItem(
                 "Available",
                 self._toggle_available,
                 checked=self._is_available
             ),
-            Item(
+            MenuItem(
                 "Notifications",
                 self._toggle_notifications,
                 checked=self._notifications_enabled
             ),
-            Item(
+            MenuItem(
                 "Scheduler",
                 self._toggle_scheduler,
                 checked=self._scheduler_enabled
             ),
             pystray.Menu.SEPARATOR,
-            Item("Open Config File", self._open_config),
-            Item("About", self._show_about),
-            Item("Quit", self._quit)
+            MenuItem("Open Config File", self._open_config),
+            MenuItem("About", self._show_about),
+            MenuItem("Quit", self._quit)
         )
 
     def start(self) -> None:
