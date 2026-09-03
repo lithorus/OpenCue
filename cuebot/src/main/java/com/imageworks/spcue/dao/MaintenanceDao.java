@@ -15,6 +15,8 @@
 
 package com.imageworks.spcue.dao;
 
+import java.util.List;
+
 import com.imageworks.spcue.MaintenanceTask;
 
 /**
@@ -62,5 +64,28 @@ public interface MaintenanceDao {
      * function. This fixes subscription accountability issues that can occur at large scale.
      */
     void recalculateSubscriptions();
+
+    /**
+     * Finds active depends whose depended-on entity (job, layer, or frame) is already complete.
+     * These are stale depends that should have been satisfied but weren't due to transient
+     * failures.
+     *
+     * @param limit maximum number of depend IDs to return
+     * @param includeEatenAsComplete when true, EATEN frames count as completion alongside
+     *        SUCCEEDED; when false, only SUCCEEDED frames satisfy dependencies (matches the
+     *        {@code depend.satisfy_only_on_frame_success} runtime behavior)
+     * @return list of pk_depend values for stale active depends
+     */
+    List<String> findStaleDependIds(int limit, boolean includeEatenAsComplete);
+
+    /**
+     * Fixes frames stuck in DEPEND state by setting int_depend_count to 0 for frames that have no
+     * active depends targeting them. The DB trigger update_frame_dep_to_wait handles the DEPEND to
+     * WAITING state transition automatically.
+     *
+     * @param limit maximum number of frames to fix per invocation
+     * @return number of frames fixed
+     */
+    int fixStuckDependCounts(int limit);
 
 }

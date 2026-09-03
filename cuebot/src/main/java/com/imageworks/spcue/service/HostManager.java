@@ -27,6 +27,7 @@ import com.imageworks.spcue.LocalHostAssignment;
 import com.imageworks.spcue.ProcInterface;
 import com.imageworks.spcue.ShowInterface;
 import com.imageworks.spcue.Source;
+import com.imageworks.spcue.StrandedCoreStats;
 import com.imageworks.spcue.VirtualProc;
 import com.imageworks.spcue.dao.criteria.FrameSearchInterface;
 import com.imageworks.spcue.dao.criteria.ProcSearchInterface;
@@ -201,6 +202,12 @@ public interface HostManager {
     int getStrandedCoreUnits(HostInterface h);
 
     /**
+     * Return per-allocation core counts (total, idle, memory-stranded) across all UP and OPEN
+     * hosts, one entry per allocation.
+     */
+    List<StrandedCoreStats> getStrandedCoreStats();
+
+    /**
      * Return the number of stranded cores on the host.
      */
     int getStrandedGpuUnits(HostInterface h);
@@ -252,4 +259,13 @@ public interface HostManager {
      * @param rhost RenderHost with updated tag information
      */
     void updateHostTags(DispatchHost host, RenderHost rhost);
+
+    /**
+     * Reconcile idle resources by recomputing from actual proc reservations. Returns true if drift
+     * was detected and corrected.
+     *
+     * @param host HostInterface
+     * @return boolean
+     */
+    boolean reconcileIdleResources(HostInterface host);
 }

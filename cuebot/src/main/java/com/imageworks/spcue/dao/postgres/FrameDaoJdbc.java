@@ -18,11 +18,14 @@ package com.imageworks.spcue.dao.postgres;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.sql.Timestamp;
 import java.util.Optional;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.env.Environment;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.support.JdbcDaoSupport;
@@ -41,6 +44,7 @@ import com.imageworks.spcue.dao.FrameDao;
 import com.imageworks.spcue.dao.criteria.FrameSearchInterface;
 import com.imageworks.spcue.dispatcher.Dispatcher;
 import com.imageworks.spcue.dispatcher.FrameReservationException;
+import com.imageworks.spcue.dispatcher.LayerDelayRules;
 import com.imageworks.spcue.grpc.depend.DependType;
 import com.imageworks.spcue.grpc.job.CheckpointState;
 import com.imageworks.spcue.grpc.job.FrameExitStatus;
@@ -55,15 +59,47 @@ import com.imageworks.spcue.util.SqlUtil;
 
 public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
 
-    private static final String UPDATE_FRAME_STOPPED_NORSS = "UPDATE " + "frame " + "SET "
-            + "str_state=?, " + "int_exit_status = ?, " + "ts_stopped = current_timestamp, "
-            + "ts_updated = current_timestamp,  " + "int_version = int_version + 1, "
-            + "int_total_past_core_time = int_total_past_core_time + "
-            + "round(INTERVAL_TO_SECONDS(current_timestamp - ts_started) * int_cores / 100),"
-            + "int_total_past_gpu_time = int_total_past_gpu_time + "
-            + "round(INTERVAL_TO_SECONDS(current_timestamp - ts_started) * int_gpus) " + "WHERE "
-            + "frame.pk_frame = ? " + "AND " + "frame.str_state = ? " + "AND "
-            + "frame.int_version = ? ";
+    /**
+     * Exit statuses that do not consume a retry when the frame is next started: hardware or
+     * dispatch conditions not attributable to the frame itself, plus any statuses configured for
+     * automatic layer backoff (dispatcher.layer_delay.rules).
+     *
+     * The layer_delay half of this list is deliberately coupled to
+     * {@link com.imageworks.spcue.dispatcher.FrameCompleteHandler}, which parses the same property
+     * to decide which statuses send a frame back to WAITING and delay its layer. Both sides read
+     * dispatcher.layer_delay.rules through {@link LayerDelayRules#parse}; keep them reading the
+     * same property, or a delayed frame will silently burn its retries here.
+     */
+    private final Integer[] retryExclusions;
+
+    @Autowired
+    public FrameDaoJdbc(Environment env) {
+        List<Integer> exclusions = new ArrayList<Integer>(Arrays.asList(-1,
+                FrameExitStatus.SKIP_RETRY_VALUE, FrameExitStatus.FAILED_LAUNCH_VALUE,
+                Dispatcher.EXIT_STATUS_FRAME_CLEARED, Dispatcher.EXIT_STATUS_FRAME_ORPHAN,
+                Dispatcher.EXIT_STATUS_FAILED_KILL, Dispatcher.EXIT_STATUS_DOWN_HOST));
+        exclusions.addAll(LayerDelayRules.parse(env.getProperty("dispatcher.layer_delay.rules", ""))
+                .keySet());
+        this.retryExclusions = exclusions.toArray(new Integer[0]);
+    }
+
+    // spotless:off
+    private static final String UPDATE_FRAME_STOPPED_NORSS =
+            "UPDATE frame "
+            + "SET "
+                + "str_state=?, "
+                + "int_exit_status = ?, "
+                + "ts_stopped = current_timestamp, "
+                + "ts_updated = current_timestamp,  "
+                + "int_version = int_version + 1, "
+                + "int_total_past_core_time = int_total_past_core_time + "
+                    + "round(INTERVAL_TO_SECONDS(current_timestamp - ts_started) * int_cores / 100),"
+                + "int_total_past_gpu_time = int_total_past_gpu_time + "
+                    + "round(INTERVAL_TO_SECONDS(current_timestamp - ts_started) * int_gpus) "
+            + "WHERE frame.pk_frame = ? "
+            + "AND frame.str_state = ? "
+            + "AND frame.int_version = ? ";
+    // spotless:on
 
     @Override
     public boolean updateFrameStopped(FrameInterface frame, FrameState state, int exitStatus) {
@@ -71,17 +107,24 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 frame.getFrameId(), FrameState.RUNNING.toString(), frame.getVersion()) == 1;
     }
 
-    private static final String UPDATE_FRAME_STOPPED = "UPDATE " + "frame " + "SET "
-            + "str_state=?, " + "int_exit_status = ?, "
-            + "ts_stopped = current_timestamp + interval '1' second, "
-            + "ts_updated = current_timestamp, " + "int_mem_max_used = ?, "
-            + "int_version = int_version + 1, "
-            + "int_total_past_core_time = int_total_past_core_time + "
-            + "round(INTERVAL_TO_SECONDS(current_timestamp + interval '1' second - ts_started) * int_cores / 100), "
-            + "int_total_past_gpu_time = int_total_past_gpu_time + "
-            + "round(INTERVAL_TO_SECONDS(current_timestamp + interval '1' second - ts_started) * int_gpus) "
-            + "WHERE " + "frame.pk_frame = ? " + "AND " + "frame.str_state = ? " + "AND "
-            + "frame.int_version = ? ";
+    // spotless:off
+    private static final String UPDATE_FRAME_STOPPED =
+            "UPDATE frame "
+            + "SET "
+                + "str_state=?, "
+                + "int_exit_status = ?, "
+                + "ts_stopped = current_timestamp + interval '1' second, "
+                + "ts_updated = current_timestamp, "
+                + "int_mem_max_used = ?, "
+                + "int_version = int_version + 1, "
+                + "int_total_past_core_time = int_total_past_core_time + "
+                    + "round(INTERVAL_TO_SECONDS(current_timestamp + interval '1' second - ts_started) * int_cores / 100), "
+                + "int_total_past_gpu_time = int_total_past_gpu_time + "
+                    + "round(INTERVAL_TO_SECONDS(current_timestamp + interval '1' second - ts_started) * int_gpus) "
+            + "WHERE frame.pk_frame = ? "
+            + "AND frame.str_state = ? "
+            + "AND frame.int_version = ? ";
+    // spotless:on
 
     @Override
     public boolean updateFrameStopped(FrameInterface frame, FrameState state, int exitStatus,
@@ -91,11 +134,19 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 frame.getFrameId(), FrameState.RUNNING.toString(), frame.getVersion()) == 1;
     }
 
-    private static final String UPDATE_FRAME_REASON = "UPDATE " + "frame " + "SET "
-            + "str_state = ?, " + "int_exit_status = ?, " + "ts_stopped = current_timestamp, "
-            + "ts_updated = current_timestamp, " + "int_version = int_version + 1 " + "WHERE "
-            + "frame.pk_frame = ? " + "AND " + "frame.pk_frame NOT IN "
-            + "(SELECT proc.pk_frame FROM " + "proc WHERE proc.pk_frame=?)";
+    // spotless:off
+    private static final String UPDATE_FRAME_REASON =
+            "UPDATE frame "
+            + "SET "
+                + "str_state = ?, "
+                + "int_exit_status = ?, "
+                + "ts_stopped = current_timestamp, "
+                + "ts_updated = current_timestamp, "
+                + "int_version = int_version + 1 "
+            + "WHERE frame.pk_frame = ? "
+            + "AND frame.pk_frame NOT IN "
+                + "(SELECT proc.pk_frame FROM proc WHERE proc.pk_frame=?)";
+    // spotless:on
 
     private int updateFrame(FrameInterface frame, int exitStatus) {
 
@@ -110,14 +161,38 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return updateFrame(frame, Dispatcher.EXIT_STATUS_DOWN_HOST) > 0;
     }
 
+    // spotless:off
+    private static final String UPDATE_FRAME_CLEARED_IF_RUNNING =
+            "UPDATE frame "
+            + "SET "
+                + "str_state = ?, "
+                + "int_exit_status = ?, "
+                + "ts_stopped = current_timestamp, "
+                + "ts_updated = current_timestamp, "
+                + "int_version = int_version + 1 "
+            + "WHERE frame.pk_frame = ? "
+            + "AND frame.str_state = ? "
+            + "AND frame.int_version = ? "
+            + "AND frame.pk_frame NOT IN "
+                + "(SELECT proc.pk_frame FROM proc WHERE proc.pk_frame=?)";
+    // spotless:on
+
     @Override
-    public boolean updateFrameCleared(FrameInterface frame) {
-        return updateFrame(frame, Dispatcher.EXIT_STATUS_FRAME_CLEARED) > 0;
+    public boolean updateFrameClearedIfRunning(FrameInterface frame) {
+        return getJdbcTemplate().update(UPDATE_FRAME_CLEARED_IF_RUNNING,
+                FrameState.WAITING.toString(), Dispatcher.EXIT_STATUS_FRAME_CLEARED,
+                frame.getFrameId(), FrameState.RUNNING.toString(), frame.getVersion(),
+                frame.getFrameId()) > 0;
     }
 
+    // spotless:off
     private static final String UPDATE_FRAME_MEMORY_ERROR =
-            "UPDATE " + "frame " + "SET " + "int_exit_status = ?, "
-                    + "int_version = int_version + 1 " + "WHERE " + "frame.pk_frame = ? ";
+            "UPDATE frame "
+            + "SET "
+                + "int_exit_status = ?, "
+                + "int_version = int_version + 1 "
+            + "WHERE frame.pk_frame = ? ";
+    // spotless:on
 
     @Override
     public boolean updateFrameMemoryError(FrameInterface frame) {
@@ -127,30 +202,58 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return result > 0;
     }
 
-    private static final String UPDATE_FRAME_STARTED = "UPDATE " + "frame " + "SET "
-            + "str_state = ?, " + "str_host = ?, " + "int_cores = ?, " + "int_mem_reserved = ?, "
-            + "int_gpus = ?, " + "int_gpu_mem_reserved = ?, " + "ts_updated = current_timestamp, "
-            + "ts_started = current_timestamp, " + "ts_stopped = null, "
-            + "int_version = int_version + 1 " + "WHERE " + "pk_frame = ? " + "AND "
-            + "str_state = ? " + "AND " + "int_version = ? " + "AND " + "frame.pk_layer IN ("
-            + "SELECT " + "layer.pk_layer " + "FROM " + "layer "
-            + "LEFT JOIN layer_limit ON layer_limit.pk_layer = layer.pk_layer "
-            + "LEFT JOIN limit_record ON limit_record.pk_limit_record = layer_limit.pk_limit_record "
-            + "LEFT JOIN (" + "SELECT " + "limit_record.pk_limit_record, "
-            + "SUM(layer_stat.int_running_count) AS int_sum_running " + "FROM " + "layer_limit "
-            + "LEFT JOIN limit_record ON layer_limit.pk_limit_record = limit_record.pk_limit_record "
-            + "LEFT JOIN layer_stat ON layer_stat.pk_layer = layer_limit.pk_layer "
-            + "GROUP BY limit_record.pk_limit_record) AS sum_running "
-            + "ON limit_record.pk_limit_record = sum_running.pk_limit_record " + "WHERE "
-            + "sum_running.int_sum_running < limit_record.int_max_value "
-            + "OR sum_running.int_sum_running IS NULL " + ")";
+    // spotless:off
+    private static final String UPDATE_FRAME_STARTED =
+            "UPDATE frame "
+            + "SET "
+                + "str_state = ?, "
+                + "str_host = ?, "
+                + "int_cores = ?, "
+                + "int_mem_reserved = ?, "
+                + "int_gpus = ?, "
+                + "int_gpu_mem_reserved = ?, "
+                + "ts_updated = current_timestamp, "
+                + "ts_started = current_timestamp, "
+                + "ts_stopped = null, "
+                + "int_version = int_version + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND str_state = ? "
+            + "AND int_version = ? "
+            + "AND frame.pk_layer IN ("
+                + "SELECT layer.pk_layer "
+                + "FROM layer "
+                + "LEFT JOIN layer_limit ON layer_limit.pk_layer = layer.pk_layer "
+                + "LEFT JOIN limit_record ON limit_record.pk_limit_record = layer_limit.pk_limit_record "
+                + "LEFT JOIN ("
+                    + "SELECT "
+                        + "limit_record.pk_limit_record, "
+                        + "SUM(layer_stat.int_running_count) AS int_sum_running "
+                    + "FROM layer_limit "
+                    + "LEFT JOIN limit_record ON layer_limit.pk_limit_record = limit_record.pk_limit_record "
+                    + "LEFT JOIN layer_stat ON layer_stat.pk_layer = layer_limit.pk_layer "
+                    + "GROUP BY limit_record.pk_limit_record) AS sum_running "
+                    + "ON limit_record.pk_limit_record = sum_running.pk_limit_record "
+                + "WHERE ("
+                    + "sum_running.int_sum_running < limit_record.int_max_value "
+                    + "OR sum_running.int_sum_running IS NULL"
+                + ") "
+                + "AND ("
+                    + "layer.ts_start_after IS NULL "
+                    + "OR layer.ts_start_after <= current_timestamp"
+                + ") "
+            + ")";
+    // spotless:on
 
+    // spotless:off
     private static final String UPDATE_FRAME_RETRIES =
-            "UPDATE " + "frame " + "SET " + "int_retries = int_retries + 1 " + "WHERE "
-                    + "pk_frame = ? " + "AND " + "int_exit_status NOT IN (?,?,?,?,?,?,?) ";
+            "UPDATE frame "
+            + "SET int_retries = int_retries + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND int_exit_status <> ALL(?) ";
+    // spotless:on
 
     @Override
-    public void updateFrameStarted(VirtualProc proc, FrameInterface frame) {
+    public int updateFrameStarted(VirtualProc proc, FrameInterface frame) {
 
         lockFrameForUpdate(frame, FrameState.WAITING);
 
@@ -160,6 +263,11 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                     proc.memoryReserved, proc.gpusReserved, proc.gpuMemoryReserved,
                     frame.getFrameId(), FrameState.WAITING.toString(), frame.getVersion());
             if (result == 0) {
+                // Zero rows matched is also the normal outcome for a layer held back by its
+                // limit or its start-after gate, not only a version race.
+                logger.debug("Reservation refused for frame " + frame
+                        + "; frame was taken by another thread, or its layer is at a limit"
+                        + " or delayed by ts_start_after.");
                 String error_msg = "the frame " + frame + " was updated by another thread.";
                 throw new FrameReservationException(error_msg);
             }
@@ -173,24 +281,39 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         /*
          * Frames that were killed via nimby or hardware errors not attributed to the software do
          * not increment the retry counter. Like failed launch, orphaned frame, failed kill or down
-         * host.
+         * host. Exit statuses configured for automatic layer backoff (dispatcher.layer_delay.rules)
+         * are excluded the same way, so delayed frames keep their full retry budget for genuine
+         * failures.
          */
         try {
-            getJdbcTemplate().update(UPDATE_FRAME_RETRIES, frame.getFrameId(), -1,
-                    FrameExitStatus.SKIP_RETRY_VALUE, FrameExitStatus.FAILED_LAUNCH_VALUE,
-                    Dispatcher.EXIT_STATUS_FRAME_CLEARED, Dispatcher.EXIT_STATUS_FRAME_ORPHAN,
-                    Dispatcher.EXIT_STATUS_FAILED_KILL, Dispatcher.EXIT_STATUS_DOWN_HOST);
+            getJdbcTemplate().update(UPDATE_FRAME_RETRIES, ps -> {
+                ps.setString(1, frame.getFrameId());
+                ps.setArray(2, ps.getConnection().createArrayOf("integer", retryExclusions));
+            });
         } catch (DataAccessException e) {
             throw new FrameReservationException(e.getCause());
         }
+
+        return frame.getVersion() + 1;
     }
 
+    // spotless:off
     private static final String UPDATE_FRAME_FIXED =
-            "UPDATE " + "frame " + "SET " + "str_state = ?," + "str_host=?, " + "int_cores=?, "
-                    + "int_mem_reserved = ?, " + "int_gpus = ?, " + "int_gpu_mem_reserved = ?, "
-                    + "ts_updated = current_timestamp, " + "ts_started = current_timestamp, "
-                    + "ts_stopped = null, " + "int_version = int_version + 1 " + "WHERE "
-                    + "pk_frame = ? " + "AND " + "str_state = 'RUNNING'";
+            "UPDATE frame "
+            + "SET "
+                + "str_state = ?,"
+                + "str_host=?, "
+                + "int_cores=?, "
+                + "int_mem_reserved = ?, "
+                + "int_gpus = ?, "
+                + "int_gpu_mem_reserved = ?, "
+                + "ts_updated = current_timestamp, "
+                + "ts_started = current_timestamp, "
+                + "ts_stopped = null, "
+                + "int_version = int_version + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND str_state = 'RUNNING'";
+    // spotless:on
 
     @Override
     public boolean updateFrameFixed(VirtualProc proc, FrameInterface frame) {
@@ -242,32 +365,87 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         }
     };
 
-    private static final String GET_DISPATCH_FRAME = "SELECT " + "show.str_name AS show_name, "
-            + "job.str_name AS job_name, " + "job.pk_job," + "job.pk_show," + "job.pk_facility,"
-            + "job.str_name," + "job.str_shot," + "job.str_user," + "job.int_uid,"
-            + "job.str_log_dir," + "COALESCE(str_os, '') AS str_os, "
-            + "COALESCE(str_loki_url, '') AS str_loki_url, " + "frame.str_name AS frame_name, "
-            + "frame.str_state AS frame_state, " + "frame.pk_frame, " + "frame.pk_layer, "
-            + "frame.int_retries, " + "frame.int_version, " + "layer.str_name AS layer_name, "
-            + "layer.str_type AS layer_type, " + "layer.str_cmd, " + "layer.int_cores_min,"
-            + "layer.int_cores_max," + "layer.b_threadable," + "layer.int_mem_min, "
-            + "layer.int_gpus_min," + "layer.int_gpus_max," + "layer.int_gpu_mem_min, "
-            + "layer.str_range, " + "layer.int_chunk_size, " + "layer.str_services " + "FROM "
-            + "layer, " + "job, " + "show, "
-            + "frame LEFT JOIN proc ON (proc.pk_frame = frame.pk_frame) " + "WHERE "
-            + "job.pk_show = show.pk_show " + "AND " + "frame.pk_job = job.pk_job " + "AND "
-            + "frame.pk_layer = layer.pk_layer " + "AND " + "frame.pk_frame = ?";
+    // spotless:off
+    private static final String GET_DISPATCH_FRAME =
+            "SELECT "
+                + "show.str_name AS show_name, "
+                + "job.str_name AS job_name, "
+                + "job.pk_job,"
+                + "job.pk_show,"
+                + "job.pk_facility,"
+                + "job.str_name,"
+                + "job.str_shot,"
+                + "job.str_user,"
+                + "job.int_uid,"
+                + "job.str_log_dir,"
+                + "COALESCE(str_os, '') AS str_os, "
+                + "COALESCE(str_loki_url, '') AS str_loki_url, "
+                + "frame.str_name AS frame_name, "
+                + "frame.str_state AS frame_state, "
+                + "frame.pk_frame, "
+                + "frame.pk_layer, "
+                + "frame.int_retries, "
+                + "frame.int_version, "
+                + "layer.str_name AS layer_name, "
+                + "layer.str_type AS layer_type, "
+                + "layer.str_cmd, "
+                + "layer.int_cores_min,"
+                + "layer.int_cores_max,"
+                + "layer.b_threadable,"
+                + "layer.int_mem_min, "
+                + "layer.int_gpus_min,"
+                + "layer.int_gpus_max,"
+                + "layer.int_gpu_mem_min, "
+                + "layer.str_range, "
+                + "layer.int_chunk_size, "
+                + "layer.str_services "
+            + "FROM "
+                + "layer, "
+                + "job, "
+                + "show, "
+                + "frame LEFT JOIN proc ON (proc.pk_frame = frame.pk_frame) "
+            + "WHERE job.pk_show = show.pk_show "
+            + "AND frame.pk_job = job.pk_job "
+            + "AND frame.pk_layer = layer.pk_layer "
+            + "AND frame.pk_frame = ?";
+    // spotless:on
 
+    // spotless:off
     private static final String GET_FRAME_DETAIL =
-            "SELECT " + "frame.*, " + "job.pk_facility," + "job.pk_show " + "FROM " + "frame,"
-                    + "layer," + "job," + "show " + "WHERE " + "frame.pk_job = job.pk_job " + "AND "
-                    + "frame.pk_layer = layer.pk_layer " + "AND " + "job.pk_show = show.pk_show ";
+            "SELECT "
+                + "frame.*, "
+                + "job.pk_facility,"
+                + "job.pk_show "
+            + "FROM "
+                + "frame,"
+                + "layer,"
+                + "job,"
+                + "show "
+            + "WHERE frame.pk_job = job.pk_job "
+            + "AND frame.pk_layer = layer.pk_layer "
+            + "AND job.pk_show = show.pk_show ";
+    // spotless:on
 
-    private static final String GET_MINIMAL_FRAME = "SELECT " + "frame.pk_frame,"
-            + "frame.str_name, " + "frame.pk_job, " + "frame.pk_layer, " + "frame.str_state, "
-            + "frame.int_version, " + "job.pk_show, " + "job.pk_facility " + "FROM " + "frame,"
-            + "layer," + "job," + "show " + "WHERE " + "frame.pk_job = job.pk_job " + "AND "
-            + "frame.pk_layer = layer.pk_layer " + "AND " + "job.pk_show = show.pk_show ";
+    // spotless:off
+    private static final String GET_MINIMAL_FRAME =
+            "SELECT "
+                + "frame.pk_frame,"
+                + "frame.str_name, "
+                + "frame.pk_job, "
+                + "frame.pk_layer, "
+                + "frame.str_state, "
+                + "frame.int_version, "
+                + "job.pk_show, "
+                + "job.pk_facility "
+            + "FROM "
+                + "frame,"
+                + "layer,"
+                + "job,"
+                + "show "
+            + "WHERE frame.pk_job = job.pk_job "
+            + "AND frame.pk_layer = layer.pk_layer "
+            + "AND job.pk_show = show.pk_show ";
+    // spotless:on
 
     private static final RowMapper<FrameInterface> FRAME_MAPPER = new RowMapper<FrameInterface>() {
         public FrameEntity mapRow(ResultSet rs, int rowNum) throws SQLException {
@@ -316,33 +494,59 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         }
     };
 
-    public static final String FIND_ORPHANED_FRAMES = "SELECT " + "frame.pk_frame, "
-            + "frame.pk_layer, " + "frame.str_name, " + "frame.int_version, " + "job.pk_job, "
-            + "job.pk_show, " + "job.pk_facility " + "FROM " + "frame, " + "job " + "WHERE "
-            + "job.pk_job = frame.pk_job " + "AND " + "frame.str_state = 'RUNNING' " + "AND "
-            + "job.str_state = 'PENDING' " + "AND "
-            + "(SELECT COUNT(1) FROM proc WHERE proc.pk_frame = frame.pk_frame) = 0 " + "AND "
-            + "current_timestamp - frame.ts_updated > interval '300' second";
+    // spotless:off
+    public static final String FIND_ORPHANED_FRAMES =
+            "SELECT "
+                + "frame.*, "
+                + "job.pk_show "
+            + "FROM "
+                + "frame, "
+                + "job "
+            + "WHERE job.pk_job = frame.pk_job "
+            + "AND frame.str_state = 'RUNNING' "
+            + "AND job.str_state = 'PENDING' "
+            + "AND (SELECT COUNT(1) FROM proc WHERE proc.pk_frame = frame.pk_frame) = 0 "
+            + "AND current_timestamp - frame.ts_updated > interval '300' second "
+            + "ORDER BY frame.ts_updated ASC, frame.pk_frame ASC "
+            + "LIMIT ?";
+    // spotless:on
 
     @Override
-    public List<FrameInterface> getOrphanedFrames() {
-        return getJdbcTemplate().query(FIND_ORPHANED_FRAMES, FRAME_MAPPER);
+    public List<FrameDetail> getOrphanedFrames(int limit) {
+        return getJdbcTemplate().query(FIND_ORPHANED_FRAMES, FRAME_DETAIL_MAPPER, limit);
     }
 
-    private static final String IS_ORPHAN = "SELECT " + "COUNT(1) " + "FROM " + "frame " + "WHERE "
-            + "frame.pk_frame = ? " + "AND " + "frame.str_state = 'RUNNING' " + "AND "
-            + "(SELECT COUNT(1) FROM proc WHERE proc.pk_frame = frame.pk_frame) = 0 " + "AND "
-            + "current_timestamp - frame.ts_updated > interval '300' second";
+    // spotless:off
+    private static final String IS_ORPHAN =
+            "SELECT COUNT(1) "
+            + "FROM frame "
+            + "WHERE frame.pk_frame = ? "
+            + "AND frame.str_state = 'RUNNING' "
+            + "AND (SELECT COUNT(1) FROM proc WHERE proc.pk_frame = frame.pk_frame) = 0 "
+            + "AND current_timestamp - frame.ts_updated > interval '300' second";
+    // spotless:on
 
     @Override
     public boolean isOrphan(FrameInterface frame) {
         return getJdbcTemplate().queryForObject(IS_ORPHAN, Integer.class, frame.getFrameId()) == 1;
     }
 
-    private static final String INSERT_FRAME = "INSERT INTO " + "frame " + "(" + "pk_frame, "
-            + "pk_layer, " + "pk_job, " + "str_name, " + "str_state, " + "int_number, "
-            + "int_dispatch_order, " + "int_layer_order, " + "ts_updated, " + "ts_llu " + ") "
+    // spotless:off
+    private static final String INSERT_FRAME =
+            "INSERT INTO frame ("
+                + "pk_frame, "
+                + "pk_layer, "
+                + "pk_job, "
+                + "str_name, "
+                + "str_state, "
+                + "int_number, "
+                + "int_dispatch_order, "
+                + "int_layer_order, "
+                + "ts_updated, "
+                + "ts_llu "
+            + ") "
             + "VALUES (?,?,?,?,?,?,?,?,current_timestamp,current_timestamp)";
+    // spotless:on
 
     @Override
     public void insertFrames(LayerDetail layer, List<Integer> frames) {
@@ -428,10 +632,19 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 r.getValuesArray());
     }
 
-    private static final String FIND_LONGEST_FRAME = "SELECT " + "pk_frame " + "FROM " + "frame, "
-            + "layer " + "WHERE " + "frame.pk_layer = layer.pk_layer " + "AND "
-            + "frame.pk_job = ? " + "AND " + "str_state=? " + "AND " + "layer.str_type=? "
-            + "ORDER BY " + "ts_stopped - ts_started DESC " + "LIMIT 1";
+    // spotless:off
+    private static final String FIND_LONGEST_FRAME =
+            "SELECT pk_frame "
+            + "FROM "
+                + "frame, "
+                + "layer "
+            + "WHERE frame.pk_layer = layer.pk_layer "
+            + "AND frame.pk_job = ? "
+            + "AND str_state=? "
+            + "AND layer.str_type=? "
+            + "ORDER BY ts_stopped - ts_started DESC "
+            + "LIMIT 1";
+    // spotless:on
 
     @Override
     public FrameDetail findLongestFrame(JobInterface job) {
@@ -440,10 +653,19 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return getFrameDetail(pk_frame);
     }
 
-    private static final String FIND_SHORTEST_FRAME = "SELECT " + "pk_frame " + "FROM " + "frame, "
-            + "layer " + "WHERE " + "frame.pk_layer = layer.pk_layer " + "AND "
-            + "frame.pk_job = ? " + "AND " + "frame.str_state = ? " + "AND " + "layer.str_type = ? "
-            + "ORDER BY " + "ts_stopped - ts_started ASC " + "LIMIT 1";
+    // spotless:off
+    private static final String FIND_SHORTEST_FRAME =
+            "SELECT pk_frame "
+            + "FROM "
+                + "frame, "
+                + "layer "
+            + "WHERE frame.pk_layer = layer.pk_layer "
+            + "AND frame.pk_job = ? "
+            + "AND frame.str_state = ? "
+            + "AND layer.str_type = ? "
+            + "ORDER BY ts_stopped - ts_started ASC "
+            + "LIMIT 1";
+    // spotless:on
 
     @Override
     public FrameDetail findShortestFrame(JobInterface job) {
@@ -478,10 +700,16 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         }
     }
 
+    // spotless:off
     private static final String UPDATE_FRAME_STATE =
-            "UPDATE " + "frame " + "SET " + "str_state = ?, " + "ts_updated = current_timestamp, "
-                    + "int_version = int_version + 1 " + "WHERE " + "pk_frame = ? " + "AND "
-                    + "int_version = ? ";
+            "UPDATE frame "
+            + "SET "
+                + "str_state = ?, "
+                + "ts_updated = current_timestamp, "
+                + "int_version = int_version + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND int_version = ? ";
+    // spotless:on
 
     @Override
     public boolean updateFrameState(FrameInterface frame, FrameState state) {
@@ -494,10 +722,19 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return false;
     }
 
-    private static final String MARK_AS_WAITING = "UPDATE " + "frame " + "SET " + "str_state=?, "
-            + "ts_updated = current_timestamp, " + "ts_llu = current_timestamp, "
-            + "int_depend_count = 0, " + "int_version = int_version + 1 " + "WHERE "
-            + "pk_frame = ? " + "AND " + "int_version = ? " + "AND " + "str_state = ? ";
+    // spotless:off
+    private static final String MARK_AS_WAITING =
+            "UPDATE frame "
+            + "SET "
+                + "str_state=?, "
+                + "ts_updated = current_timestamp, "
+                + "ts_llu = current_timestamp, "
+                + "int_depend_count = 0, "
+                + "int_version = int_version + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND int_version = ? "
+            + "AND str_state = ? ";
+    // spotless:on
 
     @Override
     public void markFrameAsWaiting(FrameInterface frame) {
@@ -505,16 +742,31 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 frame.getVersion(), FrameState.DEPEND.toString());
     }
 
-    private static final String MARK_AS_DEPEND = "UPDATE " + "frame " + "SET " + "str_state=?, "
-            + "int_depend_count = ?, " + "ts_updated = current_timestamp, "
-            + "int_version = int_version + 1 " + "WHERE " + "pk_frame = ? " + "AND "
-            + "int_version = ? " + "AND " + "str_state = ? ";
+    // spotless:off
+    private static final String MARK_AS_DEPEND =
+            "UPDATE frame "
+            + "SET "
+                + "str_state=?, "
+                + "int_depend_count = ?, "
+                + "ts_updated = current_timestamp, "
+                + "int_version = int_version + 1 "
+            + "WHERE pk_frame = ? "
+            + "AND int_version = ? "
+            + "AND str_state = ? ";
+    // spotless:on
 
+    // spotless:off
     private static final String GET_FRAME_DEPEND_COUNT =
-            "SELECT " + "COUNT(1) " + "FROM " + "depend " + "WHERE " + "( "
-                    + "(pk_job_depend_er = ? AND str_type LIKE 'JOB#_ON%' ESCAPE '#') " + "OR "
-                    + "pk_layer_depend_er = ? " + "OR " + "pk_frame_depend_er = ? " + ") " + "AND "
-                    + "depend.b_active = true " + "AND " + "depend.b_composite = false ";
+            "SELECT COUNT(1) "
+            + "FROM depend "
+            + "WHERE ( "
+                + "(pk_job_depend_er = ? AND str_type LIKE 'JOB#_ON%' ESCAPE '#') "
+                + "OR pk_layer_depend_er = ? "
+                + "OR pk_frame_depend_er = ? "
+            + ") "
+            + "AND depend.b_active = true "
+            + "AND depend.b_composite = false ";
+    // spotless:on
 
     public void markFrameAsDepend(FrameInterface frame) {
         // We need to full depend count in this case to reset the
@@ -528,9 +780,15 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         }
     }
 
+    // spotless:off
     private static final String FIND_HIGHEST_MEM_FRAME =
-            "SELECT " + "pk_frame " + "FROM " + "frame " + "WHERE " + "pk_job = ? " + "AND "
-                    + "str_state = ? " + "ORDER BY " + "int_mem_max_used DESC " + "LIMIT 1";
+            "SELECT pk_frame "
+            + "FROM frame "
+            + "WHERE pk_job = ? "
+            + "AND str_state = ? "
+            + "ORDER BY int_mem_max_used DESC "
+            + "LIMIT 1";
+    // spotless:on
 
     @Override
     public FrameDetail findHighestMemoryFrame(JobInterface job) {
@@ -539,9 +797,15 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return getFrameDetail(pk_frame);
     }
 
+    // spotless:off
     private static final String FIND_LOWEST_MEM_FRAME =
-            "SELECT " + "pk_frame " + "FROM " + "frame " + "WHERE " + "pk_job = ? " + "AND "
-                    + "str_state = ? " + "ORDER BY " + "int_mem_max_used ASC " + "LIMIT 1";
+            "SELECT pk_frame "
+            + "FROM frame "
+            + "WHERE pk_job = ? "
+            + "AND str_state = ? "
+            + "ORDER BY int_mem_max_used ASC "
+            + "LIMIT 1";
+    // spotless:on
 
     @Override
     public FrameDetail findLowestMemoryFrame(JobInterface job) {
@@ -710,10 +974,18 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 RESOURCE_USAGE_MAPPER, f.getFrameId());
     }
 
+    // spotless:off
     private static final String UPDATE_FRAME_MEMORY_USAGE_AND_LLU_TIME =
-            "UPDATE " + "frame " + "SET " + "ts_updated = current_timestamp,"
-                    + "int_mem_max_used = ?," + "int_mem_used = ?," + "int_pss_max_used = ?,"
-                    + "int_pss_used = ?," + "ts_llu = ? " + "WHERE " + "pk_frame = ? ";
+            "UPDATE frame "
+            + "SET "
+                + "ts_updated = current_timestamp,"
+                + "int_mem_max_used = ?,"
+                + "int_mem_used = ?,"
+                + "int_pss_max_used = ?,"
+                + "int_pss_used = ?,"
+                + "ts_llu = ? "
+            + "WHERE pk_frame = ? ";
+    // spotless:on
 
     @Override
     public void updateFrameMemoryUsageAndLluTime(FrameInterface f, long maxRss, long rss,
@@ -791,10 +1063,17 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
                 FRAME_MAPPER, JobState.PENDING.toString(), FrameState.CHECKPOINT.toString());
     }
 
+    // spotless:off
     private static final String CREATE_FRAME_STATE_OVERRIDE =
-            "INSERT INTO frame_state_display_overrides (" + "pk_frame_override," + "pk_frame,"
-                    + "str_frame_state," + "str_override_text," + "str_rgb" + ") "
-                    + "VALUES (?,?,?,?,?)";
+            "INSERT INTO frame_state_display_overrides ("
+                + "pk_frame_override,"
+                + "pk_frame,"
+                + "str_frame_state,"
+                + "str_override_text,"
+                + "str_rgb"
+            + ") "
+            + "VALUES (?,?,?,?,?)";
+    // spotless:on
 
     @Override
     public void setFrameStateDisplayOverride(String frameId, FrameStateDisplayOverride override) {
@@ -831,9 +1110,15 @@ public class FrameDaoJdbc extends JdbcDaoSupport implements FrameDao {
         return FrameStateDisplayOverrideSeq.newBuilder().addAllOverrides(overrides).build();
     }
 
+    // spotless:off
     private static final String UPDATE_FRAME_STATE_OVERRIDE =
-            "UPDATE " + "frame_state_display_overrides " + "SET " + "str_override_text = ?,"
-                    + "str_rgb = ? " + "WHERE " + "pk_frame = ? " + "AND " + "str_frame_state = ?";
+            "UPDATE frame_state_display_overrides "
+            + "SET "
+                + "str_override_text = ?,"
+                + "str_rgb = ? "
+            + "WHERE pk_frame = ? "
+            + "AND str_frame_state = ?";
+    // spotless:on
 
     @Override
     public void updateFrameStateDisplayOverride(String frameId,

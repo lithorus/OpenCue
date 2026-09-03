@@ -22,6 +22,7 @@ from __future__ import absolute_import
 import getpass
 import os
 import platform
+import time
 import unittest
 
 import mock
@@ -196,6 +197,55 @@ class LayerTests(unittest.TestCase):
 
         stubMock.SetTags.assert_called_with(
             job_pb2.LayerSetTagsRequest(layer=layer.data, tags=tags), timeout=mock.ANY)
+
+    def testSetStartAfter(self, getStubMock):
+        stubMock = mock.Mock()
+        stubMock.SetStartAfter.return_value = job_pb2.LayerSetStartAfterResponse()
+        getStubMock.return_value = stubMock
+
+        testEpoch = 1800000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME))
+        layer.setStartAfter(testEpoch, username='testuser')
+
+        stubMock.SetStartAfter.assert_called_with(
+            job_pb2.LayerSetStartAfterRequest(
+                layer=layer.data, start_after=testEpoch, username='testuser'),
+            timeout=mock.ANY)
+
+    def testClearStartAfter(self, getStubMock):
+        stubMock = mock.Mock()
+        stubMock.SetStartAfter.return_value = job_pb2.LayerSetStartAfterResponse()
+        getStubMock.return_value = stubMock
+
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME))
+        layer.clearStartAfter(username='testuser')
+
+        stubMock.SetStartAfter.assert_called_with(
+            job_pb2.LayerSetStartAfterRequest(
+                layer=layer.data, start_after=0, username='testuser'),
+            timeout=mock.ANY)
+
+    def testStartAfter(self, getStubMock):
+        testEpoch = 1800000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, start_after=testEpoch,
+                          start_after_reason='Automatic backoff: exit status 330'))
+
+        self.assertEqual(layer.startAfter(), testEpoch)
+        self.assertEqual(layer.startAfter('%Y'),
+                         time.strftime('%Y', time.localtime(testEpoch)))
+        self.assertEqual(layer.startAfterReason(), 'Automatic backoff: exit status 330')
+
+    def testStartAfterUnset(self, getStubMock):
+        # 0 means "no delay": raw callers still see 0, but a formatted call must not
+        # render the epoch as 1970.
+        layer = opencue.wrappers.layer.Layer(job_pb2.Layer(name=TEST_LAYER_NAME))
+
+        self.assertEqual(layer.startAfter(), 0)
+        self.assertEqual(layer.startAfter('%m/%d %H:%M'), '')
+        self.assertEqual(layer.startAfterReason(), '')
 
     def testSetMaxCores(self, getStubMock):
         stubMock = mock.Mock()
@@ -409,6 +459,45 @@ class LayerTests(unittest.TestCase):
         stubMock.StaggerFrames.assert_called_with(
             job_pb2.LayerStaggerFramesRequest(layer=layer.data, range=frameRange, stagger=stagger),
             timeout=mock.ANY)
+
+    def testAvailableTimeEpoch(self, getStubMock):
+        eligibleTime = 1700000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, eligible_time=eligibleTime))
+        self.assertEqual(layer.eligibleTime(), eligibleTime)
+
+    def testAvailableTimeFormatted(self, getStubMock):
+        eligibleTime = 1700000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, eligible_time=eligibleTime))
+        expected = time.strftime("%Y", time.localtime(eligibleTime))
+        self.assertEqual(layer.eligibleTime("%Y"), expected)
+
+    def testStartTimeEpoch(self, getStubMock):
+        startTime = 1700000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, start_time=startTime))
+        self.assertEqual(layer.startTime(), startTime)
+
+    def testStartTimeFormatted(self, getStubMock):
+        startTime = 1700000000
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, start_time=startTime))
+        expected = time.strftime("%Y", time.localtime(startTime))
+        self.assertEqual(layer.startTime("%Y"), expected)
+
+    def testStopTimeEpoch(self, getStubMock):
+        stopTime = 1700000300
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, stop_time=stopTime))
+        self.assertEqual(layer.stopTime(), stopTime)
+
+    def testStopTimeFormatted(self, getStubMock):
+        stopTime = 1700000300
+        layer = opencue.wrappers.layer.Layer(
+            job_pb2.Layer(name=TEST_LAYER_NAME, stop_time=stopTime))
+        expected = time.strftime("%Y", time.localtime(stopTime))
+        self.assertEqual(layer.stopTime("%Y"), expected)
 
 
 class LayerEnumTests(unittest.TestCase):

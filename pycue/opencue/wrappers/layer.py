@@ -18,6 +18,7 @@ import enum
 import getpass
 import os
 import platform
+import time
 
 from opencue_proto import job_pb2
 import opencue.api
@@ -127,6 +128,17 @@ class Layer(object):
         return self.stub.SetTags(job_pb2.LayerSetTagsRequest(layer=self.data, tags=tags),
                                  timeout=Cuebot.Timeout)
 
+    def setDispatchOrder(self, order):
+        """Sets the dispatch order for this layer.
+
+        :type  order: int
+        :param order: layer dipsatch order
+        """
+        return self.stub.SetDispatchOrder(
+            job_pb2.LayerSetDispatchOrderRequest(layer=self.data, order=order),
+            timeout=Cuebot.Timeout)
+
+
     def setMaxCores(self, cores):
         """Sets the maximum number of cores that this layer requires.
 
@@ -210,6 +222,38 @@ class Layer(object):
         return self.stub.SetTimeoutLLU(job_pb2.LayerSetTimeoutLLURequest(
             layer=self.data, timeout_llu=timeout_llu),
             timeout=Cuebot.Timeout)
+
+    def setStartAfter(self, epoch_seconds, username=None):
+        """Defers booking of this layer: no frame of the layer will start before
+        the given time.
+
+        The same field is written automatically by Cuebot's exit-status backoff
+        (e.g. a license shortage); a value set here is authoritative and replaces
+        any automatic delay, and a later automatic delay can only move the time
+        further into the future.
+
+        :type  epoch_seconds: int
+        :param epoch_seconds: UTC epoch time before which no frame may start;
+                              0 clears the delay
+        :type  username: str
+        :param username: recorded in the start-after reason for provenance;
+                         defaults to the current user
+        """
+        username = username if username else getpass.getuser()
+        return self.stub.SetStartAfter(job_pb2.LayerSetStartAfterRequest(
+            layer=self.data, start_after=epoch_seconds, username=username),
+            timeout=Cuebot.Timeout)
+
+    def clearStartAfter(self, username=None):
+        """Clears the layer's start-after delay, making it bookable immediately.
+
+        Note the layer may be delayed again automatically while the condition
+        that triggered an automatic delay (e.g. a license shortage) persists.
+
+        :type  username: str
+        :param username: recorded for provenance; defaults to the current user
+        """
+        return self.setStartAfter(0, username=username)
 
     def addRenderPartition(self, hostname, threads, max_cores, max_mem, max_gpu_memory, max_gpus):
         """Adds a render partition to the layer.
@@ -607,3 +651,117 @@ class Layer(object):
         :return: the layer's services
         """
         return [opencue.api.getService(service) for service in self.data.services]
+
+    # pylint: disable=redefined-builtin
+    def eligibleTime(self, format=None):
+        """Returns the layer eligible time in the desired format.
+
+        This is the moment the layer became eligible to run. Layers that were
+        never blocked by a dependency report the job's submission time, so the
+        value is always meaningful.
+
+        Examples:
+            None
+            "%m/%d %H:%M"           => 05/14 9:45
+            "%a %b %d %H:%M:%S %Y"  => Thu May 14 9:45:06 2026
+
+        See the format table at:
+        https://docs.python.org/3/library/time.html
+
+        :type  format: str
+        :param format: desired time format
+        :rtype:  int/str
+        :return: layer eligible time in epoch, or string version of that
+                 timestamp if format given"""
+        if not format:
+            return self.data.eligible_time
+        return time.strftime(format, time.localtime(self.data.eligible_time))
+
+    # pylint: disable=redefined-builtin
+    def startTime(self, format=None):
+        """Returns the layer start time in the desired format.
+
+        Aggregated from the layer's frames: this is the earliest time any
+        frame in the layer began running. Returns 0 while no frame has
+        started yet.
+
+        Examples:
+            None
+            "%m/%d %H:%M"           => 05/17 12:00
+            "%a %b %d %H:%M:%S %Y"  => Sun May 17 12:00:00 2026
+
+        See the format table at:
+        https://docs.python.org/3/library/time.html
+
+        :type  format: str
+        :param format: desired time format
+        :rtype:  int/str
+        :return: layer start time in epoch, or string version of that
+                 timestamp if format given"""
+        if not format:
+            return self.data.start_time
+        return time.strftime(format, time.localtime(self.data.start_time))
+
+    # pylint: disable=redefined-builtin
+    def stopTime(self, format=None):
+        """Returns the layer stop time in the desired format.
+
+        Aggregated from the layer's frames: this is the latest stop time
+        across all frames, but only once every frame has stopped. Returns
+        0 while any frame is still pending, running, or in DEPEND - mirroring
+        Job.stopTime() semantics where the value stays 0 until the whole
+        object is done.
+
+        Examples:
+            None
+            "%m/%d %H:%M"           => 05/17 12:00
+            "%a %b %d %H:%M:%S %Y"  => Sun May 17 12:00:00 2026
+
+        See the format table at:
+        https://docs.python.org/3/library/time.html
+
+        :type  format: str
+        :param format: desired time format
+        :rtype:  int/str
+        :return: layer stop time in epoch, or string version of that
+                 timestamp if format given"""
+        if not format:
+            return self.data.stop_time
+        return time.strftime(format, time.localtime(self.data.stop_time))
+
+    # pylint: disable=redefined-builtin
+    def startAfter(self, format=None):
+        """Returns the layer's start-after time in the desired format.
+
+        No frame of the layer may start before this time. Written by operators
+        (setStartAfter) or automatically by Cuebot's exit-status backoff.
+        Returns 0 when no delay is set.
+
+        Examples:
+            None
+            "%m/%d %H:%M"           => 05/17 18:00
+            "%a %b %d %H:%M:%S %Y"  => Sun May 17 18:00:00 2026
+
+        See the format table at:
+        https://docs.python.org/3/library/time.html
+
+        :type  format: str
+        :param format: desired time format
+        :rtype:  int/str
+        :return: layer start-after time in epoch, or string version of that
+                 timestamp if format given; an empty string when no delay is
+                 set and a format was given"""
+        if not format:
+            return self.data.start_after
+        if not self.data.start_after:
+            # 0 means "no delay", not the epoch; formatting it would show 1970.
+            return ''
+        return time.strftime(format, time.localtime(self.data.start_after))
+
+    def startAfterReason(self):
+        """Returns the free-text provenance of the layer's start-after time,
+        e.g. "Automatic backoff: exit status 330" or "Set by <user>".
+
+        :rtype:  str
+        :return: reason the start-after time was set, or an empty string"""
+        return self.data.start_after_reason

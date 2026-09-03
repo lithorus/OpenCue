@@ -155,88 +155,68 @@ cuegui &
 cuesubmit &
 ```
 
-## OpenCue Full Stack Deployment
+## Docker Compose Profiles
 
-The sandbox environment includes support for deploying the complete OpenCue stack with all services:
+The main `docker-compose.yml` at the repository root uses profiles to manage optional services:
 
-- **db**: PostgreSQL database for storing OpenCue data
-- **flyway**: Database migration tool for schema management
-- **cuebot**: The OpenCue server that manages jobs, frames, and hosts
-- **rqd**: The render queue daemon that runs on render hosts
-- **rest-gateway**: HTTP/REST API gateway for web access
-- **cueweb**: Web UI for monitoring and managing OpenCue
+| Profile | Services |
+|---------|----------|
+| `default` | cuebot, db, flyway, rqd (always started) |
+| `cueweb` | rest-gateway, cueweb |
+| `monitoring` | db-exporter, prometheus, grafana, loki |
+| `monitoring-full` | zookeeper, kafka, kafka-ui, elasticsearch, kibana, monitoring-indexer |
+| `all` | everything |
 
-### Quick Start with Full Stack
-
-The easiest way to deploy the full stack is using the deployment script:
+### Full Stack Deployment
 
 ```bash
 # From the OpenCue root directory
-./sandbox/deploy_opencue_full.sh
-```
-
-This script will:
-- Build all required Docker images (Cuebot, REST Gateway, CueWeb)
-- Generate a JWT secret for authentication
-- Start all services (db, flyway, cuebot, rqd, rest-gateway, cueweb)
-- Display access URLs
-
-### Manual Deployment
-
-If you prefer manual deployment:
-
-```bash
-# 1. Create required directories
 mkdir -p /tmp/rqd/logs /tmp/rqd/shots
 
-# 2. Generate a JWT secret
-export JWT_SECRET=$(openssl rand -base64 32)
+# Core only
+docker compose up -d
 
-# 3. Build the images
-docker build -t opencue/cuebot -f cuebot/Dockerfile .
-docker build -t opencue/rest-gateway:latest -f rest_gateway/Dockerfile .
-docker build -t opencue/cueweb:latest ./cueweb
+# Core + Web UI
+docker compose --profile cueweb up -d
 
-# 4. Start the full stack
-docker compose -f sandbox/docker-compose.full.yml up -d
+# Core + Web UI + Monitoring
+docker compose --profile cueweb --profile monitoring up -d
+
+# Everything
+docker compose --profile all up -d
 ```
 
 ### Access Services
 
 Once deployed, access the services at:
 
-- **CueWeb UI**: http://localhost:3000
-- **REST Gateway**: http://localhost:8448
+- **CueWeb UI**: http://localhost:3000 (requires `cueweb` profile)
+- **REST Gateway**: http://localhost:8448 (requires `cueweb` profile)
 - **Cuebot gRPC**: localhost:8443
 - **PostgreSQL**: localhost:5432
 - **RQD**: localhost:8444
+- **Grafana**: http://localhost:3001 (requires `monitoring` profile)
+- **Prometheus**: http://localhost:9090 (requires `monitoring` profile)
 
 ### Managing Services
 
 ```bash
 # Check service status
-./sandbox/deploy_opencue_full.sh status
+docker compose ps
 
 # View logs
-./sandbox/deploy_opencue_full.sh logs
+docker compose logs -f
 
 # View specific service logs
-./sandbox/deploy_opencue_full.sh logs cuebot
-./sandbox/deploy_opencue_full.sh logs rqd
-./sandbox/deploy_opencue_full.sh logs flyway
-./sandbox/deploy_opencue_full.sh logs db
-./sandbox/deploy_opencue_full.sh logs cueweb
-./sandbox/deploy_opencue_full.sh logs rest-gateway
+docker compose logs -f cuebot
+docker compose logs -f rqd
+docker compose logs -f cueweb
 
-# Stop all services
-./sandbox/deploy_opencue_full.sh down
+# Stop all services (use --profile all to ensure all profiles are stopped)
+docker compose --profile all down
 
-# Rebuild and restart
-./sandbox/deploy_opencue_full.sh build
-./sandbox/deploy_opencue_full.sh up
-
-# Clean up everything (removes volumes and images)
-./sandbox/deploy_opencue_full.sh clean
+# Remove all data volumes
+docker compose --profile all down -v
 ```
 
 ### Testing the REST Gateway
@@ -270,10 +250,145 @@ For more information on CueWeb and the REST Gateway, see:
 - [REST Gateway Deployment](https://www.opencue.io/docs/getting-started/deploying-rest-gateway/)
 - [REST API Tutorial](https://www.opencue.io/docs/tutorials/rest-api-tutorial/)
 
+## Load-test runner (`load_test_jobs.py`)
+
+`sandbox/load_test_jobs.py` is a subcommand-driven CLI for stressing the sandbox with realistic job shapes. Useful when you need to fill CueWeb / CueGUI with rows to exercise tables, dependency views, or the REST gateway.
+
+```bash
+# Bare invocation = simple subcommand with defaults (100 jobs, batch size 10).
+python sandbox/load_test_jobs.py
+```
+
+### Subcommands
+
+| Subcommand | Submits |
+|------------|---------|
+| `simple` | N independent jobs, one layer each. Default scenario. |
+| `wide` | Job(s) with many layers (default 10) and a small frame range. |
+| `deep` | Job(s) with one layer but a large frame range (default 200). |
+| `chain` | Linear dependency chain: each job depends on the previous one. |
+| `fan-out` | One blocker, N dependents (all waiting on the blocker). |
+| `fan-in` | N blockers, one dependent waiting on every blocker. |
+| `diamond` | A blocks B and C; B and C both block D. |
+| `mixed` | Realistic blend: 60% simple, 15% wide, 15% deep, plus a short paused chain. |
+| `blender` | Render a real Blender image sequence and register it as the layer's output path, so the CueWeb frame preview thumbnail viewer shows actual rendered frames. |
+
+Run `python sandbox/load_test_jobs.py <subcommand> --help` for the per-subcommand flags (`--num-jobs`, `--layers-per-job`, `--frames-per-layer`, `--chain-length`, `--dependents`, `--blockers`, `--total`, `--seed`, `--frame-count`, `--blender`, etc.).
+
+### Shared flags
+
+Every subcommand also accepts:
+
+| Flag | Effect |
+|------|--------|
+| `--show` / `--shot` / `--prefix` | Job-name segments. Default: `testing` / `testshot` / `load_test`. |
+| `--command "<argv string>"` | Override the default `/bin/sleep N` per layer. Split with `shlex`. |
+| `--sleep-seconds N` or `MIN-MAX` | Constant or range used by the default sleep command (default `1-5`). |
+| `--paused` | Submit non-dependency scenarios paused too. Dependency scenarios always submit paused so the wiring lands before any blocker is dispatched. |
+| `--batch-size N` / `--batch-pause S` | Throttle submissions (default 10 / 1.0s). |
+| `--dry-run` | Print the submission plan without contacting Cuebot. `opencue.api` is not required for `--dry-run`. |
+| `--print-names` | Echo each submitted short name (one per line, prefixed with `+`) and a final clean list - useful for piping into `xargs cueadmin -kill`. |
+| `--unique` | Append a Unix-timestamp suffix to every generated short name. Re-runs of the dependency subcommands never collide with still-pending jobs from a previous run. |
+
+Shared flags work on either side of the subcommand name (an argv normalizer pulls the subcommand to the front before argparse runs), so all of these are equivalent:
+
+```bash
+python sandbox/load_test_jobs.py simple --paused --sleep-seconds 1-10
+python sandbox/load_test_jobs.py --paused --sleep-seconds 1-10 simple
+python sandbox/load_test_jobs.py --paused --sleep-seconds 1-10        # falls back to simple
+```
+
+### Example invocations
+
+```bash
+# Backward-compatible default: 100 basic jobs in batches of 10.
+python sandbox/load_test_jobs.py
+
+# 200 simple jobs, all paused, sleeping 1-10s per frame.
+python sandbox/load_test_jobs.py simple -n 200 --paused --sleep-seconds 1-10
+
+# One job with 25 layers, each running 5 frames (stress the Layers table).
+python sandbox/load_test_jobs.py wide --layers-per-job 25 --frame-range 1-5
+
+# 10 jobs with 500 frames each (stress the Frames table + pagination).
+python sandbox/load_test_jobs.py deep -n 10 --frames-per-layer 500
+
+# A 12-deep dependency chain (each job depends on the previous one).
+# --unique avoids name collisions on re-run.
+python sandbox/load_test_jobs.py chain --chain-length 12 --unique
+
+# One blocker and 20 dependents (fan-out).
+python sandbox/load_test_jobs.py fan-out --dependents 20 --unique
+
+# 9 blockers and 1 dependent (drop-in replacement for dep_test_eligible_time.py).
+python sandbox/load_test_jobs.py fan-in --blockers 9 --unique
+
+# Diamond DAG (A -> B, A -> C, B+C -> D).
+python sandbox/load_test_jobs.py diamond --unique
+
+# Realistic mixed load: ~50 jobs split 60/15/15/10 across simple/wide/deep/chain.
+python sandbox/load_test_jobs.py mixed --total 50 --unique
+```
+
+### Blender preview render (CueWeb frame preview)
+
+The `blender` subcommand renders a real image sequence so the CueWeb **frame
+preview thumbnail viewer** has actual rendered frames to display. It renders a
+short rotating-cube sequence with **your host Blender** into the shared RQD logs
+dir (`/tmp/rqd/logs`, which the `cueweb` container mounts read-only), submits a
+paused OpenCue job, and registers the rendered files as the layer's output path.
+
+```bash
+# Render 4 frames + submit one paused job (auto-detects Blender).
+python sandbox/load_test_jobs.py blender
+
+# Render 6 frames, 3 jobs, explicit Blender path.
+python sandbox/load_test_jobs.py blender -n 3 --frame-count 6 \
+  --blender /Applications/Blender.app/Contents/MacOS/Blender
+
+# Single-job convenience wrapper (same result, focused output).
+python sandbox/render_blender_demo.py --frames 4
+```
+
+Then open the job in CueWeb → **Frames** → click the **Preview** (image) icon on
+a frame to see the render in the side panel.
+
+**Why it renders on the host, not in RQD:** the sandbox RQD runs in a minimal
+Linux container with no Blender, so it can't render the frames itself. The host
+Blender writes the PNGs into the shared logs dir instead; the submitted job's
+frames are trivial markers (launched paused so the job stays visible in Monitor
+Jobs). The images are genuine Blender renders regardless of frame state. For
+frames that *actually* run Blender on the farm, use the hybrid host-RQD setup
+(see `Running_Hybrid_RQD_setup_using_sandbox.md`).
+
+**Cross-platform / finding Blender.** Both `load_test_jobs.py blender` and
+`render_blender_demo.py` auto-detect Blender on macOS, Windows and Linux
+(CentOS, Rocky, Ubuntu, …). Resolution order: the `BLENDER` environment
+variable → `blender`/`blender.exe` on `PATH` → common install locations
+(`/Applications/Blender*.app` on macOS, `C:\Program Files\Blender Foundation\...`
+on Windows, `/usr/bin/blender` + snap/flatpak on Linux). Override with
+`--blender PATH` or `export BLENDER=/path/to/blender`. Use `--output-root` if
+your shared render dir differs from `/tmp/rqd/logs` (e.g. on Windows).
+
+### Recovering from a previous failed run
+
+The dependency subcommands submit paused so the wiring can land before any blocker is dispatched. If a previous run partially succeeded - or the script crashed before dependency wiring completed - the leftover paused jobs will collide on the next submission attempt. Two ways to recover:
+
+- **Re-run with `--unique`**: every generated short name gets a Unix-timestamp suffix, so the new submission is guaranteed not to collide with anything still hanging around.
+- **Kill the leftover jobs first**: select the rows in CueWeb and choose Kill, or run `cueadmin -kill <jobname>` for each one.
+
+When a submission collides ("The job ... is already pending"), `load_test_jobs.py` now prints a hint pointing at `--unique`. The dependency subcommands also bail cleanly with a summary when not every required job got submitted, instead of crashing on tuple unpack.
+
 ## Monitoring
 
-To get started with monitoring there is also an additional Docker compose file which sets up
-monitoring for key services.
+To start monitoring services, use the `monitoring` or `monitoring-full` profile:
 
-To learn how to run the sandbox environment with monitoring,
-see https://www.opencue.io/docs/other-guides/monitoring-with-prometheus-loki-and-grafana/.
+```bash
+# Basic monitoring (Prometheus, Grafana, Loki)
+docker compose --profile monitoring up -d
+
+# Full monitoring with event streaming (adds Kafka, Elasticsearch, Kibana)
+docker compose --profile monitoring-full up -d
+```
+
+To learn more about monitoring, see https://docs.opencue.io/docs/other-guides/monitoring-with-prometheus-loki-and-grafana/.

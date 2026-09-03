@@ -119,29 +119,17 @@ impl From<HostModel> for Host {
             id: parse_uuid(&val.pk_host),
             name: val.str_name,
             str_os: val.str_os,
-            idle_cores: CoreSize::from_multiplied(
-                val.int_cores_idle
-                    .try_into()
-                    .expect("int_cores_min/multiplier should fit on a i32"),
-            ),
+            idle_cores: CoreSize::from_multiplied(val.int_cores_idle),
             idle_memory: ByteSize::kb(val.int_mem_free as u64),
             idle_gpus: val
                 .int_gpus_idle
                 .try_into()
                 .expect("int_gpus should fit on a i32"),
             idle_gpu_memory: ByteSize::kb(val.int_gpu_mem_free as u64),
-            total_cores: CoreSize::from_multiplied(
-                val.int_cores
-                    .try_into()
-                    .expect("total_cores should fit on a i32"),
-            ),
+            total_cores: CoreSize::from_multiplied(val.int_cores),
             total_memory: ByteSize::kb(val.int_mem_total as u64),
             thread_mode: ThreadMode::try_from(val.int_thread_mode).unwrap_or_default(),
-            alloc_available_cores: CoreSize::from_multiplied(
-                val.int_alloc_available_cores
-                    .try_into()
-                    .expect("alloc_available_cores should fit on a i32"),
-            ),
+            alloc_available_cores: CoreSize::from_multiplied(val.int_alloc_available_cores),
             alloc_id: parse_uuid(&val.pk_alloc),
             alloc_name: val.str_alloc_name,
             last_updated: val.ts_ping,
@@ -179,10 +167,30 @@ FROM host h
     INNER JOIN alloc a ON h.pk_alloc = a.pk_alloc
     INNER JOIN subscription s ON s.pk_alloc = a.pk_alloc AND s.pk_show = $1
     INNER JOIN host_tag ht ON h.pk_host = ht.pk_host
-WHERE LOWER(a.pk_facility) = LOWER($2)
+WHERE a.pk_facility = $2
     AND h.str_lock_state = 'OPEN'
     AND hs.str_state = 'UP'
     AND ht.str_tag = $3
+"#;
+
+static RESTORE_HOST_RESOURCES: &str = r#"
+UPDATE host
+SET int_cores_idle = int_cores_idle + $1,
+    int_mem_idle = int_mem_idle + $2,
+    int_gpus_idle = int_gpus_idle + $3,
+    int_gpu_mem_idle = int_gpu_mem_idle + $4
+WHERE pk_host = $5
+    AND int_cores_idle + $1 <= int_cores
+    AND int_mem_idle + $2 <= int_mem
+    AND int_gpus_idle + $3 <= int_gpus
+    AND int_gpu_mem_idle + $4 <= int_gpu_mem
+"#;
+
+static RESTORE_HOST_STAT: &str = r#"
+UPDATE host_stat
+SET int_mem_free = int_mem_free + $1,
+    int_gpu_mem_free = int_gpu_mem_free + $2
+WHERE pk_host = $3
 "#;
 
 static UPDATE_HOST_RESOURCES: &str = r#"
@@ -206,43 +214,6 @@ UPDATE host_stat
 SET int_mem_free = int_mem_free - $1,
     int_gpu_mem_free = int_gpu_mem_free - $2
 WHERE pk_host = $3
-"#;
-
-static UPDATE_SUBSCRIPTION: &str = r#"
-UPDATE subscription
-SET int_cores = int_cores + $1,
-    int_gpus = int_gpus + $2
-WHERE pk_show = $3
-    AND pk_alloc = $4
-"#;
-
-static UPDATE_LAYER_RESOURCE: &str = r#"
-UPDATE layer_resource
-SET int_cores = int_cores + $1,
-    int_gpus = int_gpus + $2
-WHERE pk_layer = $3
-"#;
-
-static UPDATE_JOB_RESOURCE: &str = r#"
-UPDATE job_resource
-SET int_cores = int_cores + $1,
-    int_gpus = int_gpus + $2
-WHERE pk_job = $3
-"#;
-
-static UPDATE_FOLDER_RESOURCE: &str = r#"
-UPDATE folder_resource
-SET int_cores = int_cores + $1,
-    int_gpus = int_gpus + $2
-WHERE pk_folder = (SELECT pk_folder FROM job WHERE pk_job = $3)
-"#;
-
-static UPDATE_POINT: &str = r#"
-UPDATE point
-SET int_cores = int_cores + $1,
-    int_gpus = int_gpus + $2
-WHERE pk_dept = (SELECT pk_dept FROM job WHERE pk_job = $3)
-    AND pk_show = $4
 "#;
 
 impl HostDao {
@@ -282,12 +253,12 @@ impl HostDao {
     pub async fn fetch_hosts_by_show_facility_tag<'a>(
         &'a self,
         show_id: Uuid,
-        facility_id: Uuid,
+        facility_id: &'a str,
         tag: &'a str,
     ) -> Result<Vec<HostModel>, sqlx::Error> {
         let out = sqlx::query_as::<_, HostModel>(QUERY_HOST_BY_SHOW_FACILITY_AND_TAG)
             .bind(show_id.to_string())
-            .bind(facility_id.to_string())
+            .bind(facility_id)
             .bind(tag)
             .fetch_all(&*self.connection_pool)
             .await;
@@ -301,9 +272,11 @@ impl HostDao {
 
     /// Acquires an advisory lock on a host to prevent concurrent dispatch.
     ///
-    /// Uses PostgreSQL's advisory lock mechanism to ensure only one dispatcher
-    /// can modify a host's resources at a time. The lock is based on a hash
-    /// of the host ID string.
+    /// Uses PostgreSQL's transaction-scoped advisory lock mechanism to ensure
+    /// only one dispatcher can modify a host's resources at a time. The lock is
+    /// based on a hash of the host ID string and is released automatically when
+    /// the surrounding transaction commits or rolls back — there is no unlock
+    /// call, so the lock can never leak onto a pooled connection.
     ///
     /// # Arguments
     /// * `host_id` - The UUID of the host to lock
@@ -318,38 +291,12 @@ impl HostDao {
         host_id: &Uuid,
     ) -> Result<bool> {
         trace!("Locking {}", host_id);
-        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock(hashtext($1))")
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtext($1))")
             .bind(host_id.to_string())
             .fetch_one(&mut **transaction)
             .await
             .into_diagnostic()
             .wrap_err("Failed to acquire advisory lock")
-    }
-
-    /// Releases an advisory lock on a host after dispatch completion.
-    ///
-    /// Releases the PostgreSQL advisory lock that was acquired during
-    /// the dispatch process, allowing other dispatchers to access the host.
-    ///
-    /// # Arguments
-    /// * `host_id` - The UUID of the host to unlock
-    ///
-    /// # Returns
-    /// * `Ok(true)` - Lock successfully released
-    /// * `Ok(false)` - Lock was not held by this process
-    /// * `Err(miette::Error)` - Database operation failed
-    pub async fn unlock(
-        &self,
-        transaction: &mut Transaction<'_, Postgres>,
-        host_id: &Uuid,
-    ) -> Result<bool> {
-        trace!("Unlocking {}", host_id);
-        sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock(hashtext($1))")
-            .bind(host_id.to_string())
-            .fetch_one(&mut **transaction)
-            .await
-            .into_diagnostic()
-            .wrap_err("Failed to release advisory lock")
     }
 
     /// Updates a host's available resource counts after frame dispatch.
@@ -377,7 +324,8 @@ impl HostDao {
                 .bind(virtual_proc.cores_reserved.value())
                 .bind((virtual_proc.memory_reserved.as_u64() / KB) as i64)
                 .bind(virtual_proc.gpus_reserved as i32)
-                .bind(virtual_proc.gpu_memory_reserved.as_u64() as i64)
+                // GPU memory is stored in KB on the database, like main memory
+                .bind((virtual_proc.gpu_memory_reserved.as_u64() / KB) as i64)
                 .bind(host_id.to_string())
                 .fetch_optional(&mut **transaction)
                 .await
@@ -391,56 +339,12 @@ impl HostDao {
         if CONFIG.host_cache.update_stat_on_book {
             sqlx::query(UPDATE_HOST_STAT)
                 .bind((virtual_proc.memory_reserved.as_u64() / KB) as i64)
-                .bind(virtual_proc.gpu_memory_reserved.as_u64() as i64)
+                .bind((virtual_proc.gpu_memory_reserved.as_u64() / KB) as i64)
                 .bind(host_id.to_string())
                 .execute(&mut **transaction)
                 .await
                 .map_err(|err| check_resource_limit_error(err, "Failed to update host stat"))?;
         }
-
-        sqlx::query(UPDATE_SUBSCRIPTION)
-            .bind(virtual_proc.cores_reserved.value())
-            .bind(virtual_proc.gpus_reserved as i32)
-            .bind(virtual_proc.show_id.to_string())
-            .bind(virtual_proc.alloc_id.to_string())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|err| {
-                check_resource_limit_error(err, "Failed to update subscription resources")
-            })?;
-
-        sqlx::query(UPDATE_LAYER_RESOURCE)
-            .bind(virtual_proc.cores_reserved.value())
-            .bind(virtual_proc.gpus_reserved as i32)
-            .bind(virtual_proc.layer_id.to_string())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|err| check_resource_limit_error(err, "Failed to update layer resources"))?;
-
-        sqlx::query(UPDATE_JOB_RESOURCE)
-            .bind(virtual_proc.cores_reserved.value())
-            .bind(virtual_proc.gpus_reserved as i32)
-            .bind(virtual_proc.job_id.to_string())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|err| check_resource_limit_error(err, "Failed to update job resources"))?;
-
-        sqlx::query(UPDATE_FOLDER_RESOURCE)
-            .bind(virtual_proc.cores_reserved.value())
-            .bind(virtual_proc.gpus_reserved as i32)
-            .bind(virtual_proc.job_id.to_string())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|err| check_resource_limit_error(err, "Failed to update folder resources"))?;
-
-        sqlx::query(UPDATE_POINT)
-            .bind(virtual_proc.cores_reserved.value())
-            .bind(virtual_proc.gpus_reserved as i32)
-            .bind(virtual_proc.job_id.to_string())
-            .bind(virtual_proc.show_id.to_string())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|err| check_resource_limit_error(err, "Failed to update point resources"))?;
 
         Ok(UpdatedHostResources {
             cores_idle,
@@ -449,5 +353,42 @@ impl HostDao {
             gpu_mem_idle,
             last_updated,
         })
+    }
+
+    /// Restores host resources after a failed RQD launch.
+    ///
+    /// This is the reverse of `update_resources` - it adds back the cores, memory, and GPUs
+    /// that were reserved during dispatch. Used during compensation when the database was
+    /// committed but the RQD launch failed.
+    pub async fn restore_resources(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        host_id: &Uuid,
+        virtual_proc: &VirtualProc,
+    ) -> Result<(), HostDaoError> {
+        // Silently ignoring empty row updates here, as empty updates means resources have already
+        // been reconciled either by the reconciliation scheduled job or Cuebot.
+        sqlx::query(RESTORE_HOST_RESOURCES)
+            .bind(virtual_proc.cores_reserved.value())
+            .bind((virtual_proc.memory_reserved.as_u64() / KB) as i64)
+            .bind(virtual_proc.gpus_reserved as i32)
+            // GPU memory is stored in KB on the database, like main memory
+            .bind((virtual_proc.gpu_memory_reserved.as_u64() / KB) as i64)
+            .bind(host_id.to_string())
+            .execute(&mut **transaction)
+            .await
+            .map_err(|err| check_resource_limit_error(err, "Failed to restore host resources"))?;
+
+        if CONFIG.host_cache.update_stat_on_book {
+            sqlx::query(RESTORE_HOST_STAT)
+                .bind((virtual_proc.memory_reserved.as_u64() / KB) as i64)
+                .bind((virtual_proc.gpu_memory_reserved.as_u64() / KB) as i64)
+                .bind(host_id.to_string())
+                .execute(&mut **transaction)
+                .await
+                .map_err(|err| check_resource_limit_error(err, "Failed to restore host stat"))?;
+        }
+
+        Ok(())
     }
 }

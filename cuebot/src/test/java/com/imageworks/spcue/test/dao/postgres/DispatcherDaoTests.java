@@ -45,6 +45,8 @@ import com.imageworks.spcue.dao.HostDao;
 import com.imageworks.spcue.dao.JobDao;
 import com.imageworks.spcue.dao.LayerDao;
 import com.imageworks.spcue.dao.ProcDao;
+import com.imageworks.spcue.dao.ShowDao;
+import com.imageworks.spcue.dao.postgres.DispatchQuery;
 import com.imageworks.spcue.dispatcher.DispatchSupport;
 import com.imageworks.spcue.dispatcher.Dispatcher;
 import com.imageworks.spcue.grpc.host.HardwareState;
@@ -112,6 +114,9 @@ public class DispatcherDaoTests extends AbstractTransactionalJUnit4SpringContext
 
     @Resource
     BookingDao bookingDao;
+
+    @Resource
+    ShowDao showDao;
 
     private static final String HOSTNAME = "beta";
 
@@ -308,6 +313,29 @@ public class DispatcherDaoTests extends AbstractTransactionalJUnit4SpringContext
     @Test
     @Transactional
     @Rollback(true)
+    public void testFindShowsExcludesSchedulerManaged() {
+        DispatchHost host = getHost();
+
+        int beforeCount =
+                jdbcTemplate.queryForList(DispatchQuery.FIND_SHOWS, host.getAllocationId()).size();
+        assertTrue(beforeCount > 0);
+
+        try {
+            showDao.updateSchedulerManaged(adminManager.findShowEntity("pipe"), true);
+
+            int afterCount = jdbcTemplate
+                    .queryForList(DispatchQuery.FIND_SHOWS, host.getAllocationId()).size();
+            assertEquals(beforeCount - 1, afterCount);
+        } finally {
+            // ShowDao's cache lives outside the transaction; reset it so the next test
+            // sees a clean false (rollback only restores the DB, not the in-memory cache).
+            showDao.updateSchedulerManaged(adminManager.findShowEntity("pipe"), false);
+        }
+    }
+
+    @Test
+    @Transactional
+    @Rollback(true)
     public void testFindDispatchJobsByGroup() {
         DispatchHost host = getHost();
         final JobDetail job = getJob1();
@@ -354,6 +382,37 @@ public class DispatcherDaoTests extends AbstractTransactionalJUnit4SpringContext
         assertTrue(jobs.size() > 0);
     }
 
+    /**
+     * Push every layer of a job past its start-after gate, the way the automatic backoff or an
+     * operator would.
+     */
+    private void delayLayers(JobDetail job) {
+        jdbcTemplate.update("UPDATE layer SET ts_start_after = current_timestamp "
+                + "+ interval '5 minutes' WHERE pk_job=?", job.getJobId());
+    }
+
+    @Test
+    @Transactional
+    @Rollback(true)
+    public void testFindDispatchJobsByLocalIgnoresDelayedLayers() {
+        DispatchHost host = getHost();
+        final JobDetail job = getJob1();
+        assertNotNull(job);
+
+        LocalHostAssignment lja = new LocalHostAssignment();
+        lja.setThreads(1);
+        lja.setMaxMemory(CueUtil.GB16);
+        lja.setMaxCoreUnits(200);
+        lja.setMaxGpuMemory(1);
+        bookingDao.insertLocalHostAssignment(host, job, lja);
+
+        assertTrue(dispatcherDao.findLocalDispatchJobs(host).size() > 0);
+
+        // The job's only waiting layers are delayed, so it is not a local booking candidate.
+        delayLayers(job);
+        assertEquals(0, dispatcherDao.findLocalDispatchJobs(host).size());
+    }
+
     @Test
     @Transactional
     @Rollback(true)
@@ -380,6 +439,11 @@ public class DispatcherDaoTests extends AbstractTransactionalJUnit4SpringContext
 
         boolean under = dispatcherDao.findUnderProcedJob(job1, proc);
         assertTrue(under);
+
+        // Delaying the under-proced job's layers removes it as a preemption target: there is
+        // nothing bookable there, so the proc should not be unbooked for it.
+        delayLayers(job2);
+        assertFalse(dispatcherDao.findUnderProcedJob(job1, proc));
     }
 
     @Test
@@ -412,6 +476,10 @@ public class DispatcherDaoTests extends AbstractTransactionalJUnit4SpringContext
 
         boolean isHigher = dispatcherDao.higherPriorityJobExists(job1, proc);
         assertTrue(isHigher);
+
+        // Same for the higher-priority job: a delayed layer is not a reason to unbook.
+        delayLayers(job2);
+        assertFalse(dispatcherDao.higherPriorityJobExists(job1, proc));
     }
 
     @Test

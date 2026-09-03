@@ -21,6 +21,8 @@ from __future__ import print_function
 from __future__ import division
 
 import functools
+import html
+import time
 
 from qtpy import QtCore
 from qtpy import QtGui
@@ -36,10 +38,10 @@ import cuegui.AbstractWidgetItem
 import cuegui.Constants
 import cuegui.Logger
 import cuegui.MenuActions
+import cuegui.Style
 import cuegui.Utils
 
 logger = cuegui.Logger.getLogger(__file__)
-
 
 def displayRange(layer):
     """Returns a string representation of a layer's frame range."""
@@ -163,6 +165,32 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
                        data=lambda layer: cuegui.Utils.secondsToHHHMM(layer.data.timeout_llu*60),
                        sort=lambda layer: layer.data.timeout_llu,
                        tip="Timeout for a frames\' LLU, Hours:Minutes")
+        self.addColumn("Eligible", 100, id=24,
+                       data=lambda layer: cuegui.Utils.dateToMMDDHHMM(layer.data.eligible_time),
+                       sort=lambda layer: layer.data.eligible_time,
+                       tip="The time the layer became eligible to run. Layers that were\n"
+                           "never blocked by a dependency show the job's submission time.")
+        self.addColumn("Start Time", 100, id=25,
+                       data=lambda layer: cuegui.Utils.dateToMMDDHHMM(layer.data.start_time),
+                       sort=lambda layer: layer.data.start_time,
+                       tip="The time the first frame of the layer began running.\n"
+                           "Aggregated from the layer's frames; blank until the first\n"
+                           "frame starts.")
+        self.addColumn("Stop Time", 100, id=26,
+                       data=lambda layer: cuegui.Utils.dateToMMDDHHMM(layer.data.stop_time),
+                       sort=lambda layer: layer.data.stop_time,
+                       tip="The time the last frame of the layer finished. Blank while\n"
+                           "any frame is still pending, running, or in DEPEND - mirroring\n"
+                           "the job's Stop Time semantics.")
+        self.addColumn("Start After", 100, id=27,
+                       data=lambda layer: (
+                           cuegui.Utils.dateToMMDDHHMM(layer.data.start_after)
+                           if layer.data.start_after else ""),
+                       sort=lambda layer: layer.data.start_after,
+                       tip="The time before which no frame of this layer may start.\n"
+                           "Set by an operator (Set Start After...) or written\n"
+                           "automatically by Cuebot's exit-status backoff, e.g. a\n"
+                           "license shortage. Hover a delayed row for the reason.")
         cuegui.AbstractTreeWidget.AbstractTreeWidget.__init__(self, parent)
 
         # pylint: disable=no-member
@@ -298,8 +326,8 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         self.__menuActions.layers().addAction(depend_menu, "markdone")
         menu.addMenu(depend_menu)
 
+        menu.addSeparator()
         if len(__selectedObjects) == 1:
-            menu.addSeparator()
             try:
                 if int(self.app.settings.value("DisableDeeding", 0)) == 0:
                     if len({layer.data.range for layer in __selectedObjects}) == 1:
@@ -315,6 +343,7 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
 
         menu.addSeparator()
         self.__menuActions.layers().addAction(menu, "setProperties").setEnabled(not readonly)
+        self.__menuActions.layers().addAction(menu, "setStartAfter").setEnabled(not readonly)
         menu.addSeparator()
         self.__menuActions.layers().addAction(menu, "kill").setEnabled(not readonly)
         self.__menuActions.layers().addAction(menu, "eat").setEnabled(not readonly)
@@ -373,6 +402,37 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
 class LayerWidgetItem(cuegui.AbstractWidgetItem.AbstractWidgetItem):
     """Widget item for displaying a single layer."""
 
+    # Index of the "Start After" column, resolved from the column definitions on
+    # first use so it survives columns being added or reordered above it.
+    __startAfterColumn = None
+
     def __init__(self, rpcObject, parent):
         cuegui.AbstractWidgetItem.AbstractWidgetItem.__init__(
             self, cuegui.Constants.TYPE_LAYER, rpcObject, parent)
+        if LayerWidgetItem.__startAfterColumn is None:
+            LayerWidgetItem.__startAfterColumn = next(
+                (col for col, info in enumerate(self.column_info)
+                 if info[cuegui.AbstractWidgetItem.NAME] == "Start After"), -1)
+
+    def data(self, col, role):
+        """Extends the base data with the delayed-layer treatment: a tinted
+        row while the layer's start-after gate is in the future (self-clearing
+        once the deadline passes) and the gate's reason as the Start After
+        column's tooltip."""
+        if role == QtCore.Qt.BackgroundRole and \
+                self.rpcObject.data.start_after > time.time():
+            if cuegui.Style.ColorTheme is None:
+                cuegui.Style.init()
+            return cuegui.Style.ColorTheme.COLOR_LAYER_DELAYED_BACKGROUND
+
+        if role == QtCore.Qt.ToolTipRole and col == LayerWidgetItem.__startAfterColumn:
+            reason = self.rpcObject.data.start_after_reason
+            if not reason:
+                return reason
+            # The reason is free text embedding a client-supplied username and is
+            # promised to be displayed verbatim. Tooltips have no setTextFormat, so
+            # escape the text and force the rich-text path with an <html> wrapper;
+            # escaping alone would leave Qt in plain-text mode showing "&lt;".
+            return '<html>%s</html>' % html.escape(reason)
+
+        return cuegui.AbstractWidgetItem.AbstractWidgetItem.data(self, col, role)

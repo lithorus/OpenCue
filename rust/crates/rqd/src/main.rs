@@ -19,7 +19,10 @@ use tracing_rolling_file::{RollingConditionBase, RollingFileAppenderBase};
 
 #[cfg(target_os = "macos")]
 use crate::frame::manager;
-use crate::{config::CONFIG, system::machine};
+use crate::{
+    config::CONFIG,
+    system::{capabilities, machine},
+};
 
 mod config;
 mod frame;
@@ -38,6 +41,10 @@ fn main() -> miette::Result<()> {
 }
 
 async fn async_main() -> miette::Result<()> {
+    // Ensure provisioned paths (snapshots, machine temp) exist before any
+    // subsystem touches them.
+    CONFIG.setup()?;
+
     let log_level =
         tracing::Level::from_str(CONFIG.logging.level.as_str()).expect("Invalid log level");
     let log_builder = tracing_subscriber::fmt()
@@ -56,6 +63,20 @@ async fn async_main() -> miette::Result<()> {
     } else {
         log_builder.init();
     }
+
+    // Compile the log_exit_status_rules once now that logging is up, so an operator's typo in a
+    // rule's regex surfaces as a single startup warning instead of repeating on every failed
+    // frame (and no frame later pays to recompile them).
+    let _ = CONFIG.runner.compiled_exit_status_rules();
+
+    // Keep the exit-status rules editable without a restart (which would kill running frames
+    // on Linux): a watcher re-reads the config file periodically and swaps changed rules into
+    // the live set that all frames — including already-running ones — scan against.
+    tokio::spawn(config::watch_exit_status_rules());
+
+    // Fail fast if the config requires elevated privileges the process does not hold,
+    // instead of letting every frame fail later with an opaque error.
+    capabilities::preflight(&CONFIG.runner)?;
 
     // Start a channel for communitating when machine_monitor fully started
     let (tx, rx) = oneshot::channel::<()>();

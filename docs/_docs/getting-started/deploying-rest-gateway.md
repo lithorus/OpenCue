@@ -30,23 +30,27 @@ You also need:
 - Access to the Cuebot gRPC endpoint (typically port 8443)
 - A secure JWT secret for authentication
 
-## Quick Start with Docker (Recommended)
+## Quick Start with Docker Compose (Recommended)
 
-**Important:** The REST Gateway is not included in OpenCue's main `docker-compose.yml` and must be deployed separately.
+The REST Gateway and OpenCueWeb are included in OpenCue's main `docker-compose.yml` under the `cueweb` profile.
 
-### Step 1: Start OpenCue Stack
+### Step 1: Start OpenCue Stack with Web UI
 
 From the OpenCue repository root:
 
 ```bash
-# Start core OpenCue services (database, cuebot, rqd)
-docker compose up -d
+# Start core services plus REST Gateway and OpenCueWeb
+docker compose --profile cueweb up -d
 
 # Check service status
 docker compose ps
 ```
 
-### Step 2: Deploy REST Gateway Separately
+The REST Gateway will be available at `http://localhost:8448` and OpenCueWeb at `http://localhost:3000`.
+
+### Step 2: Deploy REST Gateway Separately (Alternative)
+
+If you prefer to run the REST Gateway as a standalone container:
 
 ```bash
 # Generate JWT secret for REST API authentication
@@ -64,8 +68,6 @@ docker run -d --name opencue-rest-gateway \
   -e LOG_LEVEL=info \
   opencue-rest-gateway:latest
 ```
-
-The REST Gateway will be available at `http://localhost:8448` alongside the OpenCue stack.
 
 ### Step 3: Run Comprehensive Tests
 
@@ -194,7 +196,7 @@ else
 fi
 ```
 
-**Note:** All endpoints require JWT authentication - there are no public health endpoints.
+**Note:** All API endpoints require JWT authentication, and there are no public health endpoints. The Swagger UI on `/swagger/` is served without a token when `SWAGGER_ENABLED` is true; it exposes documentation only, never data.
 
 For authenticated API testing:
 
@@ -330,10 +332,67 @@ The REST Gateway supports these environment variables:
 | `CUEBOT_ENDPOINT` | `localhost:8443` | Cuebot gRPC server address |
 | `REST_PORT` | `8448` | HTTP server port |
 | `JWT_SECRET` | `dev-secret-key-change-in-production` | JWT signing secret (required) |
+| `SWAGGER_ENABLED` | `true` | Serve the Swagger UI on `/swagger/` |
+| `SWAGGER_DIR` | `./gen/openapiv2` | Directory holding the generated OpenAPI documents. The Docker image sets this to `/app/gen/openapiv2` |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `CORS_ALLOWED_ORIGINS` | `*` | CORS allowed origins |
 
+## Browsing the API with Swagger UI
+
+The gateway serves an interactive Swagger UI listing every OpenCue interface:
+
+```bash
+open http://localhost:8448/swagger/
+```
+
+Pick an interface from the **Select a definition** menu in the top bar:
+
+![Swagger UI showing the ShowInterface endpoints](/assets/images/rest_gateway/swagger/swagger_ui_overview.png)
+
+Click **Authorize** and paste a JWT (see [Authentication Setup](#authentication-setup)). The `Bearer` prefix is optional; the page adds it for you.
+
+![The Authorize dialog](/assets/images/rest_gateway/swagger/swagger_ui_authorize_dialog.png)
+
+Then use **Try it out** on any endpoint to send a live request and see the response, along with the equivalent `curl` command:
+
+![A live 200 response from GetShows](/assets/images/rest_gateway/swagger/swagger_ui_execute_response.png)
+
+The UI and its assets are served by the gateway itself, so it works without internet access.
+
+The OpenAPI documents are generated from the OpenCue `.proto` files during the Docker build. They are also downloadable directly, for example at `http://localhost:8448/swagger/specs/job.swagger.json`.
+
+### Verifying the Swagger routes
+
+```bash
+# The UI, the definitions and the assets are all reachable without a token
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8448/swagger/
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8448/swagger/specs/show.swagger.json
+
+# ...while the API still rejects unauthenticated requests
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8448/show.ShowInterface/GetShows
+```
+
+Expected output: `200`, `200`, `401`.
+
+If `/swagger/` returns `401`, the routes were not mounted. Check the gateway log for either `SWAGGER_ENABLED is false; not mounting /swagger/ handlers` or `Swagger directory ... not found`.
+
 ## Security Considerations
+
+### Swagger UI Exposure
+
+The Swagger UI is served **without authentication** so the API can be browsed. Anyone who can reach the gateway's port can therefore read the complete API surface. The API endpoints themselves are unaffected and still reject unauthenticated requests.
+
+Disable the UI wherever the gateway is reachable beyond a trusted network:
+
+```bash
+docker run -d --name opencue-rest-gateway \
+  -e CUEBOT_ENDPOINT=cuebot:8443 \
+  -e REST_PORT=8448 \
+  -e JWT_SECRET="$JWT_SECRET" \
+  -e SWAGGER_ENABLED=false \
+  -p 8448:8448 \
+  opencue/rest-gateway:latest
+```
 
 ### Production Deployment
 
@@ -344,6 +403,7 @@ For production use:
 3. **Restrict CORS origins** to known domains
 4. **Use secure networks** between gateway and Cuebot
 5. **Monitor logs** for suspicious activity
+6. **Disable the Swagger UI** with `SWAGGER_ENABLED=false`, or restrict `/swagger/` at the reverse proxy
 
 ### Network Security
 

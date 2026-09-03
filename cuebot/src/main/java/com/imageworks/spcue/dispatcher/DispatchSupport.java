@@ -94,6 +94,14 @@ public interface DispatchSupport {
     static final AtomicLong clearedProcs = new AtomicLong(0);
 
     /**
+     * A lost proc whose release was deferred because the kill-before-release could not confirm the
+     * frame was stopped and the host was not confirmed dead (likely a flapping host). The proc and
+     * its RUNNING frame are left intact to avoid double-booking until the host is confirmed DOWN or
+     * the frame completes naturally.
+     */
+    static final AtomicLong deferredReleaseProcs = new AtomicLong(0);
+
+    /**
      * Long for counting dispatch errors
      */
     static final AtomicLong bookingErrors = new AtomicLong(0);
@@ -180,8 +188,38 @@ public interface DispatchSupport {
      * @param proc
      * @param reason
      * @param exitStatus
+     * @return true if the proc was actually released (unbooked and its frame reset); false if the
+     *         release was deferred to avoid double-booking a possibly-still-rendering host
      */
-    void lostProc(VirtualProc proc, String reason, int exitStatus);
+    boolean lostProc(VirtualProc proc, String reason, int exitStatus);
+
+    /**
+     * Resolves a booking whose launch RPC failed without proving the frame never started (see
+     * {@link com.imageworks.spcue.rqd.RqdLaunchUnknownOutcomeException}). The frame's state on the
+     * host is confirmed before anything is released:
+     *
+     * - Confirmed running: the proc and RUNNING frame are kept; the run finishes through its own
+     * frame complete report.
+     *
+     * - Confirmed not running by two polls a couple of seconds apart (a single poll would report a
+     * launch the host has received but not started yet as gone): the proc is deleted and the frame
+     * reset to WAITING for re-dispatch through {@link #clearFrame}, whose fence keeps a frame that
+     * started, finished and was reaped during the confirmation (it polls as not running too) from
+     * being re-rendered.
+     *
+     * - Unconfirmable (host unreachable, or {@code dispatcher.launch_confirm_budget_ms} too small
+     * to fit the second poll): fail closed, the booking is kept; the orphaned-proc reaper reclaims
+     * it through {@link #lostProc}'s own kill-and-confirm and bounded deferral if the frame never
+     * started.
+     *
+     * A non-positive budget restores the legacy behavior: release immediately with a best-effort
+     * kill.
+     *
+     * @param proc the proc created for the failed dispatch
+     * @param frame the frame the launch was for
+     * @return true if the booking was released (frame WAITING again); false if it was kept
+     */
+    boolean resolveUnknownLaunchOutcome(VirtualProc proc, DispatchFrame frame);
 
     /**
      * Unbooks a proc with no message
@@ -371,9 +409,16 @@ public interface DispatchSupport {
     /**
      * Sets the frame state to waiting for a frame with no running proc.
      *
+     * The reset is fenced on the frame still being the RUNNING run the caller started, identified
+     * by the version {@link #startFrameAndProc} recorded on the frame. A dispatch that rolled back
+     * before starting the frame, or whose frame has since completed or been re-dispatched, leaves
+     * it untouched: resetting a frame owned by another run frees it for a second booking while that
+     * run is alive.
+     *
      * @param frame
+     * @return true if the frame was reset to waiting, false if it was left alone
      */
-    void clearFrame(DispatchFrame frame);
+    boolean clearFrame(DispatchFrame frame);
 
     /**
      * Sets the frame state exitStatus to EXIT_STATUS_MEMORY_FAILURE

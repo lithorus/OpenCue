@@ -358,6 +358,9 @@ service LayerInterface {
     // Retry the Frames of this Layer
     rpc RetryFrames(LayerRetryFramesRequest) returns (LayerRetryFramesResponse);
 
+    // Set the Dispatch Order of this Layer
+    rpc SetDispatchOrder(LayerSetDispatchOrderRequest) returns (LayerSetDispatchOrderResponse);
+
     // The maximum number of cores to run on a given frame within this layer.  Fractional core values are not allowed
     // with this setting.
     rpc SetMaxCores(LayerSetMaxCoresRequest) returns (LayerSetMaxCoresResponse);
@@ -379,6 +382,11 @@ service LayerInterface {
 
     // Set the Min Memory value for the layer
     rpc SetMinMemory(LayerSetMinMemoryRequest) returns (LayerSetMinMemoryResponse);
+
+    // Do not book frames of this layer before the given time. Also written automatically by
+    // Cuebot's exit-status backoff (dispatcher.layer_delay.rules); an operator-set time is
+    // authoritative and replaces any automatic delay.
+    rpc SetStartAfter(LayerSetStartAfterRequest) returns (LayerSetStartAfterResponse);
 
     // Set tags on the layer
     rpc SetTags(LayerSetTagsRequest) returns (LayerSetTagsResponse);
@@ -522,6 +530,8 @@ message Frame {
     FrameStateDisplayOverride frame_state_display_override = 23;
     int64 max_pss = 24;
     int64 used_pss = 25;
+    int32 eligible_time = 26;
+    int32 submission_time = 27;
 }
 
 // Object for frame searching
@@ -645,6 +655,7 @@ message Job {
     float min_gpus = 21;
     float max_gpus = 22;
     string loki_url = 23;
+    int32 eligible_time = 24;
 }
 
 // Use to filter the job search.  Please note that by searching for non-pending jobs, the output is limited to 200 jobs
@@ -718,6 +729,14 @@ message Layer {
     float min_gpus = 20;
     float max_gpus = 21;
     string command = 22;
+    int32 eligible_time = 23;
+    int32 start_time = 24;
+    int32 stop_time = 25;
+    // Do not book frames of this layer before this time. Epoch seconds; 0 = not set.
+    // int64 because this is a future timestamp an operator may set past the int32 epoch limit.
+    int64 start_after = 26;
+    // Free-text provenance for start_after, displayed verbatim.
+    string start_after_reason = 27;
 }
 
 message LayerSeq {
@@ -772,6 +791,7 @@ message NestedGroup {
     float default_job_max_gpus = 15;
     float min_gpus = 16;
     float max_gpus = 17;
+    repeated Job inline_jobs = 18;
 }
 
 message NestedGroupSeq {
@@ -805,6 +825,7 @@ message NestedJob {
     JobStats stats = 21;
     float min_gpus = 22;
     float max_gpus = 23;
+    int32 eligible_time = 24;
 }
 
 
@@ -1693,6 +1714,13 @@ message LayerRetryFramesRequest {
 
 message LayerRetryFramesResponse {} // Empty
 
+message LayerSetDispatchOrderRequest {
+    Layer layer = 1;
+    int32 order = 2;
+}
+
+message LayerSetDispatchOrderResponse {} // Empty
+
 // RegisterOutputPath
 message LayerRegisterOutputPathRequest {
     Layer layer = 1;
@@ -1766,6 +1794,17 @@ message LayerSetMinMemoryRequest {
 }
 
 message LayerSetMinMemoryResponse {} // Empty
+
+// SetStartAfter
+message LayerSetStartAfterRequest {
+    Layer layer = 1;
+    // Epoch seconds; 0 clears the delay. See Layer.start_after for why this is int64.
+    int64 start_after = 2;
+    // Recorded in the layer's start_after_reason for provenance.
+    string username = 3;
+}
+
+message LayerSetStartAfterResponse {} // Empty
 
 // SetTags
 message LayerSetTagsRequest {

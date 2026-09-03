@@ -36,7 +36,7 @@
   <!-- Non-Transactional Service Domain -->
   <!-- ##################################################################################### -->
 
-  <bean id="rqdClient" class="com.imageworks.spcue.rqd.RqdClientGrpc">
+  <bean id="rqdClient" class="com.imageworks.spcue.rqd.RqdClientGrpc" destroy-method="shutdown">
     <constructor-arg index="0" type="int">
       <value>${grpc.rqd_server_port}</value>
     </constructor-arg>
@@ -66,7 +66,7 @@
     <property name="queueCapacity" value="500" />
   </bean>
 
-  <bean id="bookingQueue" class="com.imageworks.spcue.dispatcher.BookingQueue" lazy-init="true" destroy-method="shutdown">
+  <bean id="bookingQueue" class="com.imageworks.spcue.dispatcher.BookingQueue" lazy-init="true" destroy-method="shutdown" depends-on="cueDataSource,rqdClient">
     <constructor-arg index="0" type="int">
       <value>${booking_queue.threadpool.health_threshold}</value>
     </constructor-arg>
@@ -82,9 +82,10 @@
     <constructor-arg index="4" type="int">
       <value>${booking_queue.threadpool.max_pool_size}</value>
     </constructor-arg>
+    <property name="shutdownDrainMs" value="${healthy_threadpool.shutdown_drain_ms:60000}"/>
   </bean>
 
-  <bean id="dispatchQueue" class="com.imageworks.spcue.dispatcher.DispatchQueue" destroy-method="shutdown">
+  <bean id="dispatchQueue" class="com.imageworks.spcue.dispatcher.DispatchQueue" destroy-method="shutdown" depends-on="cueDataSource,rqdClient">
     <constructor-arg index="0" type="java.lang.String">
       <value>DispatchQueue</value>
     </constructor-arg>
@@ -103,9 +104,10 @@
     <constructor-arg index="5" type="int">
       <value>${dispatch.threadpool.max_pool_size}</value>
     </constructor-arg>
+    <property name="shutdownDrainMs" value="${healthy_threadpool.shutdown_drain_ms:60000}"/>
   </bean>
 
-  <bean id="manageQueue" class="com.imageworks.spcue.dispatcher.DispatchQueue"   destroy-method="shutdown">
+  <bean id="manageQueue" class="com.imageworks.spcue.dispatcher.DispatchQueue"   destroy-method="shutdown" depends-on="cueDataSource,rqdClient">
     <constructor-arg index="0" type="java.lang.String">
       <value>ManageQueue</value>
     </constructor-arg>
@@ -124,8 +126,9 @@
     <constructor-arg index="5" type="int">
       <value>${dispatch.threadpool.max_pool_size}</value>
     </constructor-arg>
+    <property name="shutdownDrainMs" value="${healthy_threadpool.shutdown_drain_ms:60000}"/>
   </bean>
-  <bean id="reportQueue" class="com.imageworks.spcue.dispatcher.HostReportQueue" destroy-method="shutdown">
+  <bean id="reportQueue" class="com.imageworks.spcue.dispatcher.HostReportQueue" destroy-method="shutdown" depends-on="cueDataSource,rqdClient">
     <constructor-arg index="0" type="int">
       <value>${report_queue.threadPoolSizeInitial}</value>
     </constructor-arg>
@@ -135,8 +138,9 @@
     <constructor-arg index="2" type="int">
       <value>${report_queue.queueSize}</value>
     </constructor-arg>
+    <property name="shutdownDrainMs" value="${host_report_queue.shutdown_drain_ms:60000}"/>
   </bean>
-  <bean id="killQueue" class="com.imageworks.spcue.dispatcher.HostReportQueue" destroy-method="shutdown">
+  <bean id="killQueue" class="com.imageworks.spcue.dispatcher.HostReportQueue" destroy-method="shutdown" depends-on="cueDataSource,rqdClient">
     <constructor-arg index="0" type="int">
       <value>${kill_queue.threadPoolSizeInitial}</value>
     </constructor-arg>
@@ -146,6 +150,7 @@
     <constructor-arg index="2" type="int">
       <value>${kill_queue.queueSize}</value>
     </constructor-arg>
+    <property name="shutdownDrainMs" value="${host_report_queue.shutdown_drain_ms:60000}"/>
   </bean>
 
 
@@ -199,6 +204,7 @@
     <property name="bookingDao" ref="bookingDao" />
     <property name="kafkaEventPublisher" ref="kafkaEventPublisher" />
     <property name="monitoringEventBuilder" ref="monitoringEventBuilder" />
+    <property name="prometheusMetrics" ref="prometheusMetricsCollector" />
   </bean>
 
   <bean id="filterManager" class="com.imageworks.spcue.service.FilterManagerService">
@@ -300,6 +306,8 @@
     <property name="manageQueue" ref="manageQueue" />
     <property name="dispatchQueue" ref="dispatchQueue" />
     <property name="reportQueue" ref="reportQueue" />
+    <property name="hostManager" ref="hostManager" />
+    <property name="layerDao" ref="layerDao" />
   </bean>
 
   <bean id="historicalManager" class="com.imageworks.spcue.service.HistoricalManagerService">
@@ -387,6 +395,7 @@
     <property name="whiteboardDao" ref="whiteboardDao" />
     <property name="serviceDao" ref="serviceDao" />
     <property name="showDao" ref="showDao" />
+    <property name="layerDao" ref="layerDao" />
     <property name="kafkaEventPublisher" ref="kafkaEventPublisher" />
     <property name="prometheusMetrics" ref="prometheusMetricsCollector" />
     <property name="monitoringEventBuilder" ref="monitoringEventBuilder" />
@@ -422,6 +431,8 @@
     <property name="historicalSupport" ref="historicalSupport" />
     <property name="departmentManager" ref="departmentManager" />
     <property name="jobManager" ref="jobManager" />
+    <property name="dependManager" ref="dependManager" />
+    <property name="rqdClient" ref="rqdClient" />
   </bean>
 
   <bean id="hardwareCheck" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
@@ -604,6 +615,36 @@
     <property name="repeatInterval" value="${maintenance.subscription_recalculation_interval_ms}" />
   </bean>
 
+  <bean id="stuckDependencyRecovery" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
+    <property name="targetObject" ref="maintenanceManager" />
+    <property name="targetMethod" value="recoverStuckDependencies" />
+  </bean>
+
+  <bean id="stuckDependencyRecoveryTrigger" class="org.springframework.scheduling.quartz.SimpleTriggerFactoryBean">
+    <property name="jobDetail" ref="stuckDependencyRecovery" />
+    <!-- 10 minute start delay to let the cue get up and running -->
+    <property name="startDelay" value="600000" />
+    <!-- repeat every 10 minutes by default (configurable via maintenance.stuck_dependency_recovery_interval_ms) -->
+    <property name="repeatInterval" value="${maintenance.stuck_dependency_recovery_interval_ms}" />
+  </bean>
+
+  <bean id="orphanedFrameCheck" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
+    <property name="targetObject" ref="maintenanceManager" />
+    <property name="targetMethod" value="clearOrphanedFrames" />
+    <property name="concurrent" value="false" />
+  </bean>
+
+  <bean id="orphanedFrameCheckTrigger" class="org.springframework.scheduling.quartz.SimpleTriggerFactoryBean">
+    <property name="jobDetail" ref="orphanedFrameCheck" />
+    <!--
+      10 minute start delay We want to give procs a chance to report in when the host first
+      starts, otherwise valid running frames will be treated as orphans.
+    -->
+    <property name="startDelay" value="600000" />
+    <!-- repeat every 60 seconds by default (configurable via maintenance.orphaned_frame_check_interval_ms) -->
+    <property name="repeatInterval" value="${maintenance.orphaned_frame_check_interval_ms:60000}" />
+  </bean>
+
   <bean class="org.springframework.scheduling.quartz.SchedulerFactoryBean" destroy-method="destroy">
    <property name="waitForJobsToCompleteOnShutdown"><value>false</value></property>
     <property name="triggers">
@@ -621,6 +662,8 @@
         <ref bean="updateShowsStatusTrigger" />
         <ref bean="collectPrometheusMetricsTrigger" />
         <ref bean="subscriptionRecalculationTrigger" />
+        <ref bean="stuckDependencyRecoveryTrigger" />
+        <ref bean="orphanedFrameCheckTrigger" />
       </list>
     </property>
   </bean>

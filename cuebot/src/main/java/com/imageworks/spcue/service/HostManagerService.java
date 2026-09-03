@@ -34,6 +34,7 @@ import com.imageworks.spcue.LocalHostAssignment;
 import com.imageworks.spcue.ProcInterface;
 import com.imageworks.spcue.ShowInterface;
 import com.imageworks.spcue.Source;
+import com.imageworks.spcue.StrandedCoreStats;
 import com.imageworks.spcue.VirtualProc;
 import com.imageworks.spcue.dao.AllocationDao;
 import com.imageworks.spcue.dao.FacilityDao;
@@ -257,6 +258,12 @@ public class HostManagerService implements HostManager {
 
     @Override
     @Transactional(propagation = Propagation.REQUIRED, readOnly = true)
+    public List<StrandedCoreStats> getStrandedCoreStats() {
+        return hostDao.getStrandedCoreStats();
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED, readOnly = true)
     public int getStrandedGpuUnits(HostInterface h) {
         return hostDao.getStrandedGpus(h);
     }
@@ -406,6 +413,12 @@ public class HostManagerService implements HostManager {
 
     public void setSubscriptionDao(SubscriptionDao subscriptionDao) {
         this.subscriptionDao = subscriptionDao;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED)
+    public boolean reconcileIdleResources(HostInterface host) {
+        return hostDao.reconcileIdleResources(host);
     }
 
     @Override

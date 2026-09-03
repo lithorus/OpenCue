@@ -1,9 +1,29 @@
 "use client";
 
+/*
+ * Copyright Contributors to the OpenCue Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
 import { ColumnDef } from "@tanstack/react-table";
 import { Button } from "@/components/ui/button";
 import { ArrowUpDown } from "lucide-react";
-import { convertMemoryToString, secondsToHHMMSS, secondsToHHHMM } from "@/app/utils/layers_frames_utils";
+import { convertMemoryToString, convertUnixToHumanReadableDate, secondsToHHMMSS, secondsToHHHMM } from "@/app/utils/layers_frames_utils";
+import { layerStartAfterSeconds } from "@/app/utils/layer_start_after_utils";
+import { LayerProgressBar } from "@/components/ui/layer-progress-bar";
+import { RowActionsCell } from "@/components/ui/row-actions-cell";
 
 export type LayerStats = {
   totalFrames: number;
@@ -55,12 +75,14 @@ export type Layer = {
   timeoutLlu: number;
   minGpus: number;
   maxGpus: number;
-};
-
-const getPercentCompleted = (layer: Layer) => {
-  if (layer.layerStats.totalFrames === 0) return "0%";
-  const completed = (layer.layerStats.succeededFrames / layer.layerStats.totalFrames) * 100.0;
-  return `${completed.toFixed(2)}%`;
+  eligibleTime?: number;
+  // No frame of this layer may start before this time (UTC epoch seconds;
+  // 0 / absent = no delay). Declared as `number | string` because the gateway
+  // marshals the proto int64 as a JSON string - same as minMemory/maxRss.
+  startAfter?: number | string;
+  // Free-text provenance for startAfter, e.g. "Set by <user>" or
+  // "Automatic backoff: exit status 330". Displayed verbatim.
+  startAfterReason?: string;
 };
 
 const renderHeader = (title: string, column: any) => (
@@ -71,6 +93,17 @@ const renderHeader = (title: string, column: any) => (
 );
 
 export const layerColumns: ColumnDef<Layer>[] = [
+  {
+    // Mobile-friendly equivalent of right-click. Sits at the leftmost
+    // edge of the row so the trigger is always reachable.
+    id: "actions",
+    header: () => <span className="sr-only">Actions</span>,
+    cell: ({ row, table }) => (
+      <RowActionsCell row={row} table={table} label="Open layer actions" />
+    ),
+    enableSorting: false,
+    enableHiding: false,
+  },
   {
     accessorKey: "dispatchOrder",
     header: ({ column }) => renderHeader("Dispatch Order", column),
@@ -160,7 +193,17 @@ export const layerColumns: ColumnDef<Layer>[] = [
   },
   {
     id: "progress",
-    accessorFn: (row) => getPercentCompleted(row),
+    // Keep the numeric percentage as the accessor value so sorting still
+    // works on a real number; the cell renders the animated stacked bar
+    // (same component the Jobs table uses).
+    accessorFn: (row) => {
+      if (row.layerStats.totalFrames === 0) return 0;
+      return (row.layerStats.succeededFrames / row.layerStats.totalFrames) * 100;
+    },
+    sortingFn: (rowA, rowB, columnId) => {
+      return (rowA.getValue(columnId) as number) - (rowB.getValue(columnId) as number);
+    },
+    cell: ({ row }) => <LayerProgressBar layer={row.original} />,
     header: ({ column }) => renderHeader("Progress", column),
   },
   {
@@ -172,5 +215,32 @@ export const layerColumns: ColumnDef<Layer>[] = [
     id: "timeoutLlu",
     accessorFn: (row) => secondsToHHHMM(row.timeoutLlu),
     header: ({ column }) => renderHeader("Timeout LLU", column),
+  },
+  {
+    id: "eligible",
+    accessorFn: (row) => (row.eligibleTime ? convertUnixToHumanReadableDate(row.eligibleTime) : ""),
+    header: ({ column }) => renderHeader("Eligible", column),
+  },
+  {
+    // The time before which no frame of this layer may start. Set by an
+    // operator (Set Start After...) or written automatically by Cuebot's
+    // exit-status backoff, e.g. a license shortage. The accessor keeps the
+    // raw epoch so sorting stays numeric; the cell formats it and carries
+    // the reason as its tooltip.
+    id: "startAfter",
+    accessorFn: (row) => layerStartAfterSeconds(row),
+    sortingFn: (rowA, rowB, columnId) =>
+      (rowA.getValue(columnId) as number) - (rowB.getValue(columnId) as number),
+    cell: ({ row }) => {
+      const startAfter = layerStartAfterSeconds(row.original);
+      if (!startAfter) return null;
+      const reason = row.original.startAfterReason ?? "";
+      return (
+        // `title` renders the reason as plain text, so a username embedded in
+        // it can never be interpreted as markup.
+        <span title={reason || undefined}>{convertUnixToHumanReadableDate(startAfter)}</span>
+      );
+    },
+    header: ({ column }) => renderHeader("Start After", column),
   },
 ];

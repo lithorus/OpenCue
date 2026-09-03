@@ -23,9 +23,11 @@ use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    allocation::allocation_service,
+    accounting::{booking_delta::BookingDelta, error::AccountingError, AccountingService},
     config::CONFIG,
-    dao::{FrameDao, FrameDaoError, HostDao, LayerDao, ProcDao, UpdatedHostResources},
+    dao::{
+        FrameDao, FrameDaoError, HostDao, LayerDao, ProcDao, ProcDaoError, UpdatedHostResources,
+    },
     metrics,
     models::{CoreSize, DispatchFrame, DispatchLayer, Host, VirtualProc},
     pgpool::begin_transaction,
@@ -37,7 +39,10 @@ use crate::{
 };
 use opencue_proto::{
     host::ThreadMode,
-    rqd::{rqd_interface_client::RqdInterfaceClient, RqdStaticLaunchFrameRequest, RunFrame},
+    rqd::{
+        rqd_interface_client::RqdInterfaceClient, RqdStaticKillRunningFrameRequest,
+        RqdStaticLaunchFrameRequest, RunFrame,
+    },
 };
 
 /// Actor wrapper for RqdDispatcher that provides message-based dispatch operations.
@@ -53,6 +58,7 @@ pub struct RqdDispatcherService {
     layer_dao: Arc<LayerDao>,
     host_dao: Arc<HostDao>,
     proc_dao: Arc<ProcDao>,
+    accounting: Arc<AccountingService>,
     rqd_connection_cache: Cache<String, RqdInterfaceClient<Channel>>,
     dry_run_mode: bool,
 }
@@ -73,7 +79,11 @@ impl Handler<DispatchLayerMessage> for RqdDispatcherService {
     type Result = ResponseActFuture<Self, Result<DispatchResult, DispatchError>>;
 
     fn handle(&mut self, msg: DispatchLayerMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let DispatchLayerMessage { layer, host } = msg;
+        let DispatchLayerMessage {
+            layer,
+            host,
+            job_cores_in_use,
+        } = msg;
 
         let dispatcher = self.clone();
         debug!(
@@ -92,8 +102,11 @@ impl Handler<DispatchLayerMessage> for RqdDispatcherService {
                     .await
                     .map_err(DispatchError::DbFailure)?;
 
-                match dispatcher.dispatch(&layer, host, &mut transaction).await {
-                    Ok((updated_host, updated_layer)) => {
+                match dispatcher
+                    .dispatch(&layer, host, job_cores_in_use, &mut transaction)
+                    .await
+                {
+                    Ok((updated_host, updated_layer, cores_booked)) => {
                         // Commit the transaction
                         transaction
                             .commit()
@@ -103,6 +116,7 @@ impl Handler<DispatchLayerMessage> for RqdDispatcherService {
                         Ok(DispatchResult {
                             updated_host,
                             updated_layer,
+                            cores_booked,
                         })
                     }
                     Err(e) => {
@@ -133,6 +147,7 @@ impl RqdDispatcherService {
         layer_dao: Arc<LayerDao>,
         host_dao: Arc<HostDao>,
         proc_dao: Arc<ProcDao>,
+        accounting: Arc<AccountingService>,
         dry_run_mode: bool,
     ) -> Result<Self> {
         let rqd_connection_cache = Cache::builder()
@@ -148,6 +163,7 @@ impl RqdDispatcherService {
             layer_dao,
             host_dao,
             proc_dao,
+            accounting,
             dry_run_mode,
             rqd_connection_cache,
         })
@@ -171,8 +187,9 @@ impl RqdDispatcherService {
         &self,
         layer: &DispatchLayer,
         host: Host,
+        job_cores_in_use: i32,
         transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<(Host, DispatchLayer), DispatchError> {
+    ) -> Result<(Host, DispatchLayer, i32), DispatchError> {
         let host_id = host.id;
         let host_disp = format!("{}", &host);
         let layer_disp = format!("{}", &layer);
@@ -187,22 +204,19 @@ impl RqdDispatcherService {
             return Err(DispatchError::HostLock(host.name.clone()));
         }
 
-        // Ensure unlock is always called, regardless of panics or fails
-        let result = std::panic::AssertUnwindSafe(self.dispatch_inner(layer, host))
-            .catch_unwind()
-            .await;
-
-        // Always attempt to unlock, regardless of outcome. Failing to unlock here can be ignored as
-        // endint the transaction will automatically unlock.
-        if let Err(unlock_err) = self.host_dao.unlock(transaction, &host_id).await {
-            trace!("Failed to unlock host {}: {}", host_disp, unlock_err);
-        }
+        // The advisory lock is transaction-scoped: it is released automatically
+        // when the caller commits or rolls back `transaction`, including when
+        // dispatch_inner panics.
+        let result =
+            std::panic::AssertUnwindSafe(self.dispatch_inner(layer, host, job_cores_in_use))
+                .catch_unwind()
+                .await;
 
         // Handle the result from dispatch_inner
         match result {
             Ok(result) => {
                 if result.is_ok() {
-                    info!(
+                    debug!(
                         "Successfully dispatched layer {} on {}.",
                         layer_disp, host_disp
                     );
@@ -221,7 +235,8 @@ impl RqdDispatcherService {
         &self,
         layer: &DispatchLayer,
         host: Host,
-    ) -> Result<(Host, DispatchLayer), DispatchError> {
+        job_cores_in_use: i32,
+    ) -> Result<(Host, DispatchLayer, i32), DispatchError> {
         // A host should not book frames if its allocation is at or above its limit,
         // but checking the limit before each frame is too costly. The tradeoff is
         // to check the allocation state before entering the frame booking loop,
@@ -229,24 +244,20 @@ impl RqdDispatcherService {
         // a great margin as each loop only runs for a limited number of frames
         // (see config queue.dispatch_frames_per_layer_limit)
         let mut allocation_capacity = host.alloc_available_cores;
-        let allocation_name = host.alloc_name.clone();
         let mut last_host_version = host;
-
-        let allocation_service = allocation_service().await.map_err(|err| {
-            DispatchError::Failure(err.wrap_err("Allocation Service is not available"))
-        })?;
-        // Use a closure for this validation to reduce the number of arguments that would be passed
-        // to dispatch_virtual_proc.
-        let is_subscription_bookable = |cores_requested| {
-            matches!(allocation_service.get_subscription(&allocation_name, &layer.show_id),
-                Some(subscription) if subscription.bookable(&cores_requested)
-            )
-        };
 
         // Deliberately cloning the layer to avoid requiring a mutable reference
         let mut layer = layer.clone();
         let mut last_error = None;
         let mut non_retrieable_frames = Vec::new();
+
+        // Cores booked for this job within this dispatch call. Added to the
+        // caller-supplied `job_cores_in_use` so each frame's reservation is
+        // clamped against the job's *remaining* cap, mirroring Cuebot's
+        // VirtualProc.build. Without this, a single threadable frame reserves a
+        // whole fat host (e.g. 32 cores) and the accounting check rejects it forever against
+        // a small job cap (e.g. 16), wedging the job at zero booked.
+        let mut job_cores_booked: i32 = 0;
 
         // Use an unique id for all logs on this dispatch
         let dispatch_id = Uuid::new_v4();
@@ -254,10 +265,51 @@ impl RqdDispatcherService {
         for frame in &layer.frames {
             let frame_str = format!("{}", frame);
 
+            // Compute the job's remaining core budget. `job_max_cores <= 0`
+            // means unlimited (OpenCue's "unlimited" cap sentinel).
+            let job_cores_remaining = if layer.job_max_cores > 0 {
+                let remaining = layer.job_max_cores - (job_cores_in_use + job_cores_booked);
+                // Normalize the frame's request into the canonical positive core
+                // demand on this host before comparing to the remaining budget.
+                // `min_cores <= 0` is a sentinel (0 = whole host, negative =
+                // all-but-N), so a raw `remaining < frame.min_cores.value()`
+                // comparison would slip past the check (e.g. `0 < 0` is false)
+                // when a capped job has `remaining == 0`, then build a host-sized
+                // reservation that the accounting check rejects forever. Non-threadable frames
+                // always reserve exactly one core regardless of the sentinel.
+                let frame_min_cores = if frame.threadable {
+                    Self::calculate_cores_requested(frame.min_cores, last_host_version.total_cores)
+                        .value()
+                } else {
+                    1
+                };
+                // If the job can't fit even one minimum-sized frame, it's at its
+                // cap: stop the layer here rather than reserving a sub-minimum
+                // proc or busy-looping on guaranteed accounting rejections.
+                if remaining < frame_min_cores {
+                    debug!(
+                        "({dispatch_id}) Job {} at core cap (max={}, in_use={}, booked_here={}); \
+                         stopping layer {}",
+                        layer.job_id,
+                        layer.job_max_cores,
+                        job_cores_in_use,
+                        job_cores_booked,
+                        layer
+                    );
+                    break;
+                }
+                Some(CoreSize(remaining))
+            } else {
+                None
+            };
+
             let (virtual_proc, updated_host) = match Self::consume_host_virtual_resources(
                 frame,
                 &last_host_version,
+                layer.folder_id,
+                layer.dept_id,
                 CONFIG.queue.memory_stranded_threshold,
+                job_cores_remaining,
             )
             .await
             {
@@ -271,50 +323,27 @@ impl RqdDispatcherService {
                 }
             };
 
+            // Capture the actual cores reserved (in cores) before `virtual_proc`
+            // is moved into dispatch_virtual_proc, so a successful booking can be
+            // added to the running job budget.
+            let reserved_cores: CoreSize = virtual_proc.cores_reserved.into();
+
             debug!(
                 "({dispatch_id}) Host {} will have {} cores available after update",
                 updated_host.id, updated_host.idle_cores
             );
-
-            // Each proc should run on its own transaction
-            let mut proc_transaction = begin_transaction()
-                .await
-                .map_err(DispatchError::DbFailure)?;
-
-            // Before dispatching, confirm the layer still has limits
-            if !self
-                .layer_dao
-                .check_limits(&mut proc_transaction, &layer)
-                .await
-                .map_err(DispatchError::DbFailure)?
-            {
-                proc_transaction
-                    .rollback()
-                    .await
-                    .map_err(DispatchError::DbFailure)?;
-                info!("({dispatch_id}) Skiping layer {}, reached limits", layer);
-
-                // Skip the entire layer
-                break;
-            }
 
             match self
                 .dispatch_virtual_proc(
                     dispatch_id,
                     virtual_proc,
                     updated_host,
-                    &mut proc_transaction,
-                    &is_subscription_bookable,
+                    &layer,
                     allocation_capacity,
                 )
                 .await
             {
                 Ok((new_host, new_allocation_capacity)) => {
-                    proc_transaction
-                        .commit()
-                        .await
-                        .map_err(DispatchError::DbFailure)?;
-
                     // Track successful frame dispatch
                     metrics::increment_frames_dispatched(&frame.show_name);
 
@@ -324,20 +353,20 @@ impl RqdDispatcherService {
                     }
 
                     non_retrieable_frames.push(frame.id);
+                    job_cores_booked += reserved_cores.value();
                     allocation_capacity = new_allocation_capacity;
                     last_host_version = new_host;
                 }
                 Err(err) => {
-                    proc_transaction
-                        .rollback()
-                        .await
-                        .map_err(DispatchError::DbFailure)?;
-
                     match err {
                         DispatchVirtualProcError::AllocationOverBurst(err) => {
-                            info!("({dispatch_id}) {frame_str} {err}");
+                            debug!("({dispatch_id}) {frame_str} {err}");
 
                             last_error = Some(err);
+                            break;
+                        }
+                        DispatchVirtualProcError::LayerLimitReached => {
+                            debug!("({dispatch_id}) Skipping layer {}, reached limits", layer);
                             break;
                         }
                         DispatchVirtualProcError::FailedToStartOnDb(err) => {
@@ -352,7 +381,7 @@ impl RqdDispatcherService {
                                 | DispatchError::FailedToCreateProc { .. } => {
                                     // Resource contention during DB updates is expected in
                                     // multi-scheduler environments.
-                                    info!(
+                                    debug!(
                                         "({dispatch_id}) Failed to start frame {} on Db. {}",
                                         frame_str, err
                                     );
@@ -373,7 +402,7 @@ impl RqdDispatcherService {
                         DispatchVirtualProcError::HostResourcesExhausted => {
                             // Host resources were booked by another scheduler (e.g. Cuebot)
                             // between cache refresh and dispatch. Break the loop and try another host.
-                            info!(
+                            debug!(
                                 "({dispatch_id}) Host resources exhausted for frame {} (likely booked by another scheduler)",
                                 frame_str
                             );
@@ -382,22 +411,25 @@ impl RqdDispatcherService {
                             break;
                         }
                         DispatchVirtualProcError::FrameCouldNotBeUpdated => {
-                            // The entire transaction is probably compromised, stop working on this layer
-                            info!(
-                                "({dispatch_id}) Frame {} couldn't be updated on the database. Version has changed.",
+                            // Frame was already claimed by another dispatcher - skip it
+                            // and continue with the next frame. No proc or host resources
+                            // were consumed since the frame update is the first operation.
+                            debug!(
+                                "({dispatch_id}) Frame {} already claimed by another dispatcher. Skipping.",
                                 frame_str
                             );
                             non_retrieable_frames.push(frame.id);
-                            break;
+                            continue;
                         }
                         DispatchVirtualProcError::ResourceLimitExceeded(err) => {
                             // Resource limit enforced by database trigger (e.g. job max cores,
                             // subscription burst size). This is expected in normal operation.
-                            info!("({dispatch_id}) {frame_str} {err}");
+                            debug!("({dispatch_id}) {frame_str} {err}");
                             last_error = Some(err);
                             break;
                         }
                         DispatchVirtualProcError::RqdConnectionFailed { host, error } => {
+                            // Compensation already ran inside dispatch_virtual_proc.
                             // An error here means connection with this host is probably broken,
                             // there's no reason to attempt the next frame
                             warn!(
@@ -413,7 +445,7 @@ impl RqdDispatcherService {
         }
 
         if non_retrieable_frames.is_empty() {
-            info!(
+            debug!(
                 "Found no frames on {} to dispatch to {}",
                 layer, last_host_version
             );
@@ -435,92 +467,189 @@ impl RqdDispatcherService {
 
         if let Some(error) = last_error {
             match &error {
-                DispatchError::ResourceLimitExceeded(_)
-                | DispatchError::AllocationOverBurst(_)
+                DispatchError::ResourceLimitExceeded(_) => {
+                    // Counted into an aggregate surfaced by the recompute heartbeat
+                    // rather than logged per layer-dispatch (this is hot on a capped show).
+                    metrics::increment_resource_limit_exceeded();
+                    debug!("Wasn't able to dispatch all frames: {:?}", error)
+                }
+                DispatchError::AllocationOverBurst(_)
                 | DispatchError::HostResourcesExhausted(_)
                 | DispatchError::FailedToUpdateResources(_)
                 | DispatchError::FailedToCreateProc { .. } => {
-                    info!("Wasn't able to dispatch all frames: {:?}", error)
+                    debug!("Wasn't able to dispatch all frames: {:?}", error)
                 }
                 _ => {
                     warn!("Wasn't able to dispatch all frames: {:?}", error)
                 }
             }
         }
-        Ok((last_host_version, layer))
+        Ok((last_host_version, layer, job_cores_booked))
     }
 
     /// Dispatches a virtual proc to a host, handling allocation checks, database updates, and RQD communication.
     ///
     /// This function encapsulates the complete dispatch process for a single virtual proc:
     /// 1. Validates allocation capacity against subscription limits
-    /// 2. Updates frame status in the database
-    /// 3. Launches the frame on RQD (or logs in dry-run mode)
-    /// 4. Updates host resources and proc records in the database
+    /// 2. Checks layer limits
+    /// 3. Updates frame status, proc record, and host resources in the database
+    /// 4. Commits the transaction (releasing all DB locks before the network call)
+    /// 5. Launches the frame on RQD (or logs in dry-run mode)
+    /// 6. On RQD failure, compensates by undoing database changes
     ///
-    /// # Arguments
-    /// * `virtual_proc` - The virtual proc to dispatch
-    /// * `updated_host` - The host with updated resource allocations
-    /// * `transaction` - Database transaction for atomic updates
-    /// * `is_subscription_bookable` - Closure to check if subscription can accept more cores
-    /// * `allocation_capacity` - Current available allocation capacity
-    ///
-    /// # Returns
-    /// On success, returns a tuple of (updated host, new allocation capacity).
-    /// On failure, returns a `DispatchVirtualProcError` indicating the specific failure mode.
+    /// The transaction is committed before the RQD call to avoid holding row-level
+    /// locks on `job_stat`/`layer_stat` during network I/O. If the RQD call fails,
+    /// compensation logic deletes the proc, restores host resources, and clears
+    /// the frame back to WAITING state.
     async fn dispatch_virtual_proc(
         &self,
         dispatch_id: Uuid,
-        virtual_proc: VirtualProc,
+        mut virtual_proc: VirtualProc,
         host: Host,
-        transaction: &mut Transaction<'_, Postgres>,
-        is_subscription_bookable: &impl Fn(CoreSize) -> bool,
+        layer: &DispatchLayer,
         allocation_capacity: CoreSize,
     ) -> Result<(Host, CoreSize), DispatchVirtualProcError> {
         trace!("({dispatch_id}) Built virtual proc {}", virtual_proc);
-        let cores_reserved_without_multiplier: CoreSize = virtual_proc.cores_reserved.into();
+        // `cores_reserved` is centicores (CoreSizeWithMultiplier); convert to cores for
+        // both the booking delta (store = cores, design §0 unit invariant) and the
+        // per-cluster allocation_capacity comparison below (which is already CoreSize).
+        let cores_reserved: CoreSize = virtual_proc.cores_reserved.into();
 
-        // Check allocation capacity in two ways
-        //  - Check the cached subscription to account for external bookings
-        //  - Check for cores consumed by this dispatcher iteration
-        if !is_subscription_bookable(cores_reserved_without_multiplier)
-            || cores_reserved_without_multiplier > allocation_capacity
-        {
+        // Build the booking delta once - used by the booking apply and by any compensation rollback.
+        let delta = BookingDelta {
+            show_id: virtual_proc.show_id,
+            alloc_id: virtual_proc.alloc_id,
+            folder_id: virtual_proc.folder_id,
+            job_id: virtual_proc.job_id,
+            core_delta: i64::from(cores_reserved.value()),
+            gpu_delta: virtual_proc.gpus_reserved as i32,
+        };
+
+        // Per-cluster host accounting check - this dispatcher iteration may have already
+        // consumed cores from the allocation above what the store knows about.
+        if cores_reserved > allocation_capacity {
             return Err(DispatchVirtualProcError::AllocationOverBurst(
                 DispatchError::AllocationOverBurst(host.alloc_name.clone()),
             ));
         }
         let new_allocation_capacity = allocation_capacity - virtual_proc.cores_reserved.into();
 
-        // Update database
-        let updated_resources = self
-            .update_database_for_dispatch(transaction, &virtual_proc, host.id)
-            .await?;
+        // In-memory accounting check + increment first - atomic across subscription /
+        // folder / job under one lock. Limit exceeded here means one of those hard caps
+        // would be breached; we bail before opening a transaction. `Booking` records
+        // whether the delta was applied (managed show) so confirm/rollback can no-op for
+        // Cuebot-managed shows and survive a mid-dispatch managed flip.
+        let booking = self.accounting.apply_booking(&delta).map_err(|err| match err {
+            AccountingError::LimitExceeded {
+                table,
+                current,
+                limit,
+            } => {
+                // Tracks "wasted" booking attempts — see
+                // `pipeline/matcher.rs::process_layer` for the trade-off this metric
+                // exists to measure.
+                metrics::increment_accounting_limit_exceeded(&table);
+                DispatchVirtualProcError::ResourceLimitExceeded(
+                    DispatchError::ResourceLimitExceeded(format!(
+                        "{table}: current={current} limit={limit}"
+                    )),
+                )
+            }
+        })?;
+
+        // From this point on, any failure before successful RQD launch must roll back the
+        // booking we just applied. Closure captures `self.accounting` and `booking` so the
+        // rollback sites stay terse.
+        let accounting = &self.accounting;
+        let rollback_on_error = async || {
+            accounting.rollback_booking(&booking);
+        };
+
+        // Begin a per-proc transaction for DB updates
+        let mut proc_transaction = match begin_transaction().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                rollback_on_error().await;
+                return Err(DispatchVirtualProcError::FailedToStartOnDb(
+                    DispatchError::DbFailure(e),
+                ));
+            }
+        };
+
+        // Confirm the layer still has limits before proceeding
+        match self
+            .layer_dao
+            .check_limits(&mut proc_transaction, layer)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = proc_transaction.rollback().await;
+                rollback_on_error().await;
+                return Err(DispatchVirtualProcError::LayerLimitReached);
+            }
+            Err(e) => {
+                let _ = proc_transaction.rollback().await;
+                rollback_on_error().await;
+                return Err(DispatchVirtualProcError::FailedToStartOnDb(
+                    DispatchError::DbFailure(e),
+                ));
+            }
+        }
+
+        // Update database (insert proc, update host resources, start frame)
+        let updated_resources = match self
+            .update_database_for_dispatch(&mut proc_transaction, &virtual_proc, host.id)
+            .await
+        {
+            Ok((resources, new_frame_version)) => {
+                // The frame UPDATE bumped int_version V -> V+1. Record it on our local
+                // `virtual_proc` so a later compensation `clear_frame` guards on the row
+                // this dispatch just advanced, not the stale pre-dispatch version (which
+                // would never match, leaving the frame stuck in RUNNING).
+                virtual_proc.frame.version = new_frame_version;
+                resources
+            }
+            Err(err) => {
+                let _ = proc_transaction.rollback().await;
+                rollback_on_error().await;
+                return Err(err);
+            }
+        };
+
+        // Commit BEFORE the RQD call to release job_stat/layer_stat row locks immediately
+        if let Err(e) = proc_transaction.commit().await {
+            rollback_on_error().await;
+            return Err(DispatchVirtualProcError::FailedToStartOnDb(
+                DispatchError::DbFailure(e),
+            ));
+        }
 
         // When running on dry_run_mode, just log the outcome
-        if self.dry_run_mode {
+        if !self.dry_run_mode {
+            if let Err(err) = self.launch_on_rqd(&virtual_proc, &host, true).await {
+                // RQD launch failed after DB commit. Roll back the booking and compensate
+                // the DB writes (delete proc, restore host, clear frame).
+                rollback_on_error().await;
+                self.compensate_failed_dispatch(dispatch_id, &virtual_proc, &host.name)
+                    .await;
+
+                return Err(DispatchVirtualProcError::RqdConnectionFailed {
+                    host: host.to_string(),
+                    error: miette!("{}", err),
+                });
+            }
+        } else {
             debug!(
                 "(DRY_RUN) ({dispatch_id}) Dispatching {} on {}",
                 virtual_proc, &host
             );
-        } else {
-            self.launch_on_rqd(&virtual_proc, &host, true)
-                .await
-                .map_err(|err| DispatchVirtualProcError::RqdConnectionFailed {
-                    host: host.to_string(),
-                    error: miette!("{}", err),
-                })?;
         }
 
         // Update the host struct with the actual database values after the update
         // to ensure cache and database stay in sync
         let mut updated_host = host;
-        updated_host.idle_cores = CoreSize::from_multiplied(
-            updated_resources
-                .cores_idle
-                .try_into()
-                .expect("db_cores_idle should fit in i32"),
-        );
+        updated_host.idle_cores = CoreSize::from_multiplied(updated_resources.cores_idle);
         updated_host.idle_memory = ByteSize::kb(updated_resources.mem_idle as u64);
         updated_host.idle_gpus = updated_resources
             .gpus_idle
@@ -529,15 +658,26 @@ impl RqdDispatcherService {
         updated_host.idle_gpu_memory = ByteSize::kb(updated_resources.gpu_mem_idle as u64);
         updated_host.last_updated = updated_resources.last_updated;
 
+        // Dispatch fully succeeded (proc committed + RQD launched): settle the booking so
+        // its pending delta stops being carried forward by the recompute.
+        self.accounting.confirm_booking(&booking);
+
         Ok((updated_host, new_allocation_capacity))
     }
 
     /// Updates database records for frame dispatch.
     ///
     /// This function performs three database operations atomically:
-    /// 1. Updates the frame status to "started"
+    /// 1. Updates the frame status to "started" (done first as the concurrency guard)
     /// 2. Inserts the virtual proc record
     /// 3. Updates host resource allocations
+    ///
+    /// The frame UPDATE is performed first because it acts as an optimistic lock via
+    /// `AND int_version = $7 AND str_state = 'WAITING'`. If two dispatchers race on the
+    /// same frame, only one will successfully update the row - the other sees 0 rows
+    /// affected and aborts cleanly before inserting a proc or consuming host resources.
+    /// The tradeoff is that the frame UPDATE trigger acquires row locks on `layer_stat`
+    /// and `job_stat` which are held until COMMIT, but this is accepted for correctness.
     ///
     /// # Arguments
     /// * `transaction` - Database transaction for atomic updates
@@ -552,8 +692,13 @@ impl RqdDispatcherService {
         transaction: &mut Transaction<'_, Postgres>,
         virtual_proc: &VirtualProc,
         host_id: Uuid,
-    ) -> Result<UpdatedHostResources, DispatchVirtualProcError> {
-        self.frame_dao
+    ) -> Result<(UpdatedHostResources, u32), DispatchVirtualProcError> {
+        // Update frame state first - this serves as the optimistic concurrency guard.
+        // The WHERE clause (str_state = 'WAITING' AND int_version = ...) ensures only
+        // one dispatcher can claim a given frame. Returns the post-update version so the
+        // caller can keep `virtual_proc.frame.version` in sync for compensation.
+        let new_frame_version = self
+            .frame_dao
             .update_frame_started(transaction, virtual_proc)
             .await
             .map_err(|err| match err {
@@ -565,15 +710,26 @@ impl RqdDispatcherService {
                 ),
             })?;
 
+        // Insert proc record. ON CONFLICT (pk_frame) DO NOTHING provides a safety net
+        // in case the frame was already claimed despite the version guard above.
         self.proc_dao
             .insert(transaction, virtual_proc)
             .await
-            .map_err(|(error, frame_id, host_id)| {
-                DispatchVirtualProcError::FailedToStartOnDb(DispatchError::FailedToCreateProc {
+            .map_err(|err| match err {
+                ProcDaoError::ProcAlreadyExists { .. } => {
+                    DispatchVirtualProcError::FrameCouldNotBeUpdated
+                }
+                ProcDaoError::DbFailure {
                     error,
                     frame_id,
                     host_id,
-                })
+                } => {
+                    DispatchVirtualProcError::FailedToStartOnDb(DispatchError::FailedToCreateProc {
+                        error,
+                        frame_id,
+                        host_id,
+                    })
+                }
             })?;
 
         let updated_resources = self
@@ -605,7 +761,7 @@ impl RqdDispatcherService {
                 }
             })?;
 
-        Ok(updated_resources)
+        Ok((updated_resources, new_frame_version))
     }
 
     async fn launch_on_rqd(
@@ -664,6 +820,105 @@ impl RqdDispatcherService {
         }
     }
 
+    /// Compensates a failed RQD launch by undoing database changes.
+    ///
+    /// Called when the database transaction was committed successfully but the RQD
+    /// gRPC call failed. Deletes the proc, restores host resources, and clears the
+    /// frame back to WAITING state. Each step proceeds even if a prior one fails,
+    /// as partial compensation is better than none.
+    ///
+    /// **Ordering matters:** the proc must be deleted before clearing the frame,
+    /// because `clear_frame`'s SQL guard only clears frames with no associated proc.
+    /// If `delete` fails, `clear_frame` will safely no-op thanks to that guard.
+    /// However, `restore_resources` runs unconditionally - if the proc delete failed
+    /// but restore succeeded, idle resources would be over-counted until the next
+    /// host report reconciles them. This is acceptable because a failed proc delete
+    /// will surface as an error log and the host report cycle corrects the drift.
+    ///
+    /// **In-memory accounting:** `dispatch_virtual_proc` already called
+    /// `rollback_booking` for the booking delta before invoking this DB compensation, so
+    /// the store counters are consistent with `proc` once both rollbacks complete. Any
+    /// residual drift is reconciled by the next recompute cycle from `SUM(proc)`.
+    async fn compensate_failed_dispatch(
+        &self,
+        dispatch_id: Uuid,
+        virtual_proc: &VirtualProc,
+        host_name: &str,
+    ) {
+        warn!(
+            "({dispatch_id}) Running compensation for failed RQD launch of proc {} on {}",
+            virtual_proc.proc_id, host_name
+        );
+
+        let mut tx = match begin_transaction().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("({dispatch_id}) Compensation: failed to begin transaction: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = self.proc_dao.delete(&mut tx, &virtual_proc.proc_id).await {
+            error!(
+                "({dispatch_id}) Compensation: failed to delete proc {}: {e}",
+                virtual_proc.proc_id
+            );
+        }
+
+        if let Err(e) = self
+            .host_dao
+            .restore_resources(&mut tx, &virtual_proc.host_id, virtual_proc)
+            .await
+        {
+            error!("({dispatch_id}) Compensation: failed to restore host resources: {e}");
+        }
+
+        match self.frame_dao.clear_frame(&mut tx, &virtual_proc.frame_id, virtual_proc.frame.version).await {
+            Ok(true) => info!("({dispatch_id}) Compensation: cleared frame {} back to WAITING", virtual_proc.frame_id),
+            Ok(false) => warn!("({dispatch_id}) Compensation: frame {} not cleared (proc still exists or already changed)", virtual_proc.frame_id),
+            Err(e) => error!("({dispatch_id}) Compensation: failed to clear frame {}: {e}", virtual_proc.frame_id),
+        }
+
+        if let Err(e) = tx.commit().await {
+            error!("({dispatch_id}) Compensation: failed to commit: {e}");
+        }
+
+        // Best-effort kill on RQD as precaution in case the frame was actually launched
+        self.kill_running_frame_on_rqd(
+            host_name,
+            &virtual_proc.frame_id,
+            "Compensation: RQD launch failed after DB commit",
+        )
+        .await;
+    }
+
+    /// Best-effort attempt to kill a running frame on RQD.
+    ///
+    /// Used as a precaution during dispatch compensation - if the gRPC connection was
+    /// lost but RQD actually received and launched the frame, this ensures it gets
+    /// cleaned up. All errors are logged and swallowed.
+    async fn kill_running_frame_on_rqd(&self, host_name: &str, frame_id: &Uuid, reason: &str) {
+        let mut client = match self
+            .get_rqd_connection(host_name, CONFIG.rqd.grpc_port)
+            .await
+        {
+            Ok(client) => client,
+            Err(e) => {
+                warn!("Could not connect to RQD to kill frame {frame_id}: {e}");
+                return;
+            }
+        };
+
+        let request = RqdStaticKillRunningFrameRequest {
+            frame_id: frame_id.to_string(),
+            message: reason.to_string(),
+            ..Default::default()
+        };
+        if let Err(e) = client.kill_running_frame(request).await {
+            info!("Best-effort kill_running_frame failed for frame {frame_id}: {e}");
+        }
+    }
+
     /// Calculates the actual number of cores requested based on frame requirements.
     ///
     /// Handles special core request semantics:
@@ -711,16 +966,32 @@ impl RqdDispatcherService {
         host: &Host,
         frame: &DispatchFrame,
         memory_stranded_threshold: ByteSize,
+        job_cores_remaining: Option<CoreSize>,
     ) -> CoreSize {
+        // Don't thread non-threadable layers
+        if !frame.threadable {
+            return CoreSize(1);
+        }
+
         let cores_requested = Self::calculate_cores_requested(frame.min_cores, host.total_cores);
 
-        match (host.thread_mode, frame.threadable) {
-            (ThreadMode::All, _) => host.idle_cores,
+        let cores = match (host.thread_mode, frame.threadable) {
+            (ThreadMode::All, true) => {
+                let mut cores = host.idle_cores;
+                if let Some(limit) = frame.layer_cores_limit {
+                    if limit.value() > 0 && cores > limit {
+                        cores = limit;
+                    }
+                }
+                cores
+            }
+            // (ThreadMode::All, false) is rejected upstream in MatchingService::validate_match
+            // to mirror Cuebot's DispatchQuery filter, so it cannot reach this match.
             // Limit Variable booking to at least 2 cores
             (ThreadMode::Variable, true) if cores_requested.value() <= 2 => CoreSize(2),
             (ThreadMode::Auto, true) | (ThreadMode::Variable, true) => {
                 // Book whatever is left for hosts with selfish services or memory stranded
-                if frame.has_selfish_service
+                let cores = if frame.has_selfish_service
                     || host
                         .idle_memory
                         .as_u64()
@@ -730,9 +1001,24 @@ impl RqdDispatcherService {
                     host.idle_cores
                 } else {
                     Self::calculate_memory_balanced_core_count(host, frame, cores_requested)
+                };
+                // Apply layer_cores_limit cap
+                match frame.layer_cores_limit {
+                    Some(limit) if limit.value() > 0 && cores > limit => limit,
+                    _ => cores,
                 }
             }
             _ => cores_requested,
+        };
+
+        // Clamp the threaded reservation to the job's remaining core cap so a
+        // single frame never reserves more than the job is allowed (which would
+        // be rejected by the job-cap check). `None` means unlimited.
+        // The caller guarantees `remaining >= frame.min_cores`, so this never
+        // shrinks a reservation below the frame's minimum.
+        match job_cores_remaining {
+            Some(remaining) if remaining.value() > 0 && cores > remaining => remaining,
+            _ => cores,
         }
     }
 
@@ -743,14 +1029,24 @@ impl RqdDispatcherService {
     async fn consume_host_virtual_resources(
         frame: &DispatchFrame,
         host: &Host,
+        folder_id: Uuid,
+        dept_id: Uuid,
         memory_stranded_threshold: ByteSize,
+        job_cores_remaining: Option<CoreSize>,
     ) -> Result<(VirtualProc, Host), VirtualProcError> {
         let mut host = host.clone();
 
-        let cores_reserved =
-            Self::calculate_core_reservation(&host, frame, memory_stranded_threshold);
+        let cores_reserved = Self::calculate_core_reservation(
+            &host,
+            frame,
+            memory_stranded_threshold,
+            job_cores_remaining,
+        );
 
-        if cores_reserved > host.total_cores || cores_reserved > host.idle_cores {
+        if cores_reserved.value() <= 0
+            || cores_reserved > host.total_cores
+            || cores_reserved > host.idle_cores
+        {
             Err(VirtualProcError::HostResourcesExtinguished(format!(
                 "Not enough cores: {} < {}",
                 host.idle_cores, cores_reserved
@@ -798,6 +1094,8 @@ impl RqdDispatcherService {
                 proc_id: Uuid::new_v4(),
                 host_id: host.id,
                 show_id: frame.show_id,
+                folder_id,
+                dept_id,
                 layer_id: frame.layer_id,
                 job_id: frame.job_id,
                 frame_id: frame.id,
@@ -1111,7 +1409,7 @@ mod tests {
             id: Uuid::new_v4(),
             frame_name: "0001-test_frame".to_string(),
             show_id: Uuid::new_v4(),
-            facility_id: Uuid::new_v4(),
+            facility_id: Uuid::new_v4().to_string(),
             job_id: Uuid::new_v4(),
             layer_id: Uuid::new_v4(),
             command: "echo 'test command'".to_string(),
@@ -1168,8 +1466,42 @@ mod tests {
         let memory_threshold = ByteSize::mib(500);
 
         let result =
-            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold);
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
         assert_eq!(result, CoreSize(6)); // Should return idle_cores
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_thread_mode_all_not_threadable() {
+        let mut host = create_test_host();
+        host.thread_mode = ThreadMode::All;
+        host.idle_cores = CoreSize(6);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = false;
+        frame.min_cores = CoreSize(1);
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result =
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        assert_eq!(result, CoreSize(1)); // Non-threadable should return cores_requested
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_thread_mode_all_with_layer_limit() {
+        let mut host = create_test_host();
+        host.thread_mode = ThreadMode::All;
+        host.idle_cores = CoreSize(6);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = true;
+        frame.layer_cores_limit = Some(CoreSize(2));
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result =
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        assert_eq!(result, CoreSize(2)); // Should cap at layer_cores_limit
     }
 
     #[tokio::test]
@@ -1184,7 +1516,7 @@ mod tests {
         let memory_threshold = ByteSize::mib(500);
 
         let result =
-            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold);
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
         assert_eq!(result, CoreSize(2)); // Should return 2 cores minimum
     }
 
@@ -1198,24 +1530,100 @@ mod tests {
         let memory_threshold = ByteSize::mib(500);
 
         let result =
-            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold);
-        assert_eq!(result, CoreSize(3)); // Should return cores_requested
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        assert_eq!(result, CoreSize(1)); // Non-threadable frames are clamped to 1 core
     }
 
     #[tokio::test]
-    async fn test_calculate_core_reservation_insufficient_cores() {
+    async fn test_calculate_core_reservation_not_threadable_single_core() {
+        let host = create_test_host();
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = false;
+        frame.min_cores = CoreSize(1);
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result =
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        assert_eq!(result, CoreSize(1)); // Already 1 core, no clamping needed
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_insufficient_cores_threadable() {
         let mut host = create_test_host();
         host.idle_cores = CoreSize(2);
 
         let mut frame = create_test_dispatch_frame();
+        frame.threadable = true;
         frame.min_cores = CoreSize(10); // More than available
 
         let memory_threshold = ByteSize::mib(500);
 
         let result =
-            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold);
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
         // Method shouldn't check for resource availability
         assert_eq!(result, CoreSize(10));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_insufficient_cores_not_threadable() {
+        let mut host = create_test_host();
+        host.idle_cores = CoreSize(2);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = false;
+        frame.min_cores = CoreSize(10); // More than available
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result =
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        // Non-threadable frames are clamped to 1 core
+        assert_eq!(result, CoreSize(1));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_clamped_to_job_cap() {
+        // A threadable frame on a fat host would reserve all idle cores, but the
+        // job's remaining cap must win: 32 idle cores, job allows 16 more -> 16.
+        let mut host = create_test_host();
+        host.thread_mode = ThreadMode::All;
+        host.idle_cores = CoreSize(32);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = true;
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result = RqdDispatcherService::calculate_core_reservation(
+            &host,
+            &frame,
+            memory_threshold,
+            Some(CoreSize(16)),
+        );
+        assert_eq!(result, CoreSize(16));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_job_cap_above_sizing_is_noop() {
+        // When the job's remaining cap exceeds the host-driven sizing, the
+        // reservation is unaffected (6 idle cores, cap room for 100 -> 6).
+        let mut host = create_test_host();
+        host.thread_mode = ThreadMode::All;
+        host.idle_cores = CoreSize(6);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = true;
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result = RqdDispatcherService::calculate_core_reservation(
+            &host,
+            &frame,
+            memory_threshold,
+            Some(CoreSize(100)),
+        );
+        assert_eq!(result, CoreSize(6));
     }
 
     #[test]
@@ -1401,7 +1809,10 @@ mod tests {
         let result = RqdDispatcherService::consume_host_virtual_resources(
             &frame,
             &host,
+            Uuid::nil(),
+            Uuid::nil(),
             memory_stranded_threshold,
+            None,
         )
         .await;
 
@@ -1441,7 +1852,10 @@ mod tests {
         let result = RqdDispatcherService::consume_host_virtual_resources(
             &frame,
             &host,
+            Uuid::nil(),
+            Uuid::nil(),
             memory_stranded_threshold,
+            None,
         )
         .await;
 
@@ -1464,7 +1878,10 @@ mod tests {
         let result = RqdDispatcherService::consume_host_virtual_resources(
             &frame,
             &host,
+            Uuid::nil(),
+            Uuid::nil(),
             memory_stranded_threshold,
+            None,
         )
         .await;
 
@@ -1487,7 +1904,10 @@ mod tests {
         let result = RqdDispatcherService::consume_host_virtual_resources(
             &frame,
             &host,
+            Uuid::nil(),
+            Uuid::nil(),
             memory_stranded_threshold,
+            None,
         )
         .await;
 
@@ -1507,6 +1927,8 @@ mod tests {
             proc_id: Uuid::new_v4(),
             host_id: Uuid::new_v4(),
             show_id: Uuid::new_v4(),
+            folder_id: Uuid::new_v4(),
+            dept_id: Uuid::new_v4(),
             layer_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
             frame_id: Uuid::new_v4(),
@@ -1583,6 +2005,8 @@ mod tests {
             proc_id: Uuid::new_v4(),
             host_id: Uuid::new_v4(),
             show_id: Uuid::new_v4(),
+            folder_id: Uuid::new_v4(),
+            dept_id: Uuid::new_v4(),
             layer_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
             frame_id: Uuid::new_v4(),
@@ -1619,6 +2043,8 @@ mod tests {
             proc_id: Uuid::new_v4(),
             host_id: Uuid::new_v4(),
             show_id: Uuid::new_v4(),
+            folder_id: Uuid::new_v4(),
+            dept_id: Uuid::new_v4(),
             layer_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
             frame_id: Uuid::new_v4(),
@@ -1635,5 +2061,50 @@ mod tests {
 
         let result = RqdDispatcherService::prepare_rqd_run_frame(&virtual_proc);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_consume_host_virtual_resources_zero_cores_rejected() {
+        let mut host = create_test_host();
+        host.idle_cores = CoreSize(0);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.min_cores = CoreSize(0);
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result = RqdDispatcherService::consume_host_virtual_resources(
+            &frame,
+            &host,
+            Uuid::nil(),
+            Uuid::nil(),
+            memory_threshold,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_core_reservation_variable_threadable_with_layer_limit() {
+        let mut host = create_test_host();
+        host.thread_mode = ThreadMode::Variable;
+        host.total_cores = CoreSize(8);
+        host.total_memory = ByteSize::gib(32);
+        host.idle_cores = CoreSize(8);
+        host.idle_memory = ByteSize::gib(32);
+
+        let mut frame = create_test_dispatch_frame();
+        frame.threadable = true;
+        frame.min_cores = CoreSize(3); // > 2 to avoid the Variable small-request guard
+        frame.min_memory = ByteSize::gib(16); // High memory → memory-balanced gives 4 cores
+        frame.layer_cores_limit = Some(CoreSize(3));
+
+        let memory_threshold = ByteSize::mib(500);
+
+        let result =
+            RqdDispatcherService::calculate_core_reservation(&host, &frame, memory_threshold, None);
+        // Memory-balanced would give 4 cores (16GB / 4GB-per-core), but layer limit caps at 3
+        assert_eq!(result, CoreSize(3));
     }
 }

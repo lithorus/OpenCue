@@ -1,13 +1,32 @@
+
+/*
+ * Copyright Contributors to the OpenCue Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
+ */
+
 package com.imageworks.spcue;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import com.imageworks.spcue.dao.LayerDao;
 import com.imageworks.spcue.dispatcher.BookingQueue;
 import com.imageworks.spcue.dispatcher.DispatchQueue;
 import com.imageworks.spcue.dispatcher.HostReportHandler;
 import com.imageworks.spcue.dispatcher.HostReportQueue;
+import com.imageworks.spcue.service.HostManager;
 
 import io.prometheus.client.Counter;
 import io.prometheus.client.Gauge;
@@ -123,6 +142,36 @@ public class PrometheusMetricsCollector {
             .name("cue_frames_completed_total").help("Total number of frames completed")
             .labelNames("env", "cuebot_host", "state", "show", "shot").register();
 
+    private static final Counter frameCompleteSupersededCounter = Counter.build()
+            .name("cue_frame_complete_superseded_total")
+            .help("Frame complete reports diverted because the reporting proc no longer owns "
+                    + "the reported frame (the run was superseded)")
+            .labelNames("env", "cuebot_host", "reason").register();
+
+    private static final Counter frameCompleteDroppedCounter =
+            Counter.build().name("cue_frame_complete_dropped_total")
+                    .help("Frame complete reports that could not be applied to their frame; "
+                            + "exit_status=\"0\" means a successful render result was discarded")
+                    .labelNames("env", "cuebot_host", "exit_status").register();
+
+    private static final Counter frameRetryDeferredCounter = Counter.build()
+            .name("cue_frame_retry_deferred_total")
+            .help("Frame retries deferred because the running render could not be confirmed dead")
+            .labelNames("env", "cuebot_host").register();
+
+    private static final Counter frameLaunchOutcomeUnknownCounter =
+            Counter.build().name("cue_frame_launch_outcome_unknown_total")
+                    .help("Frame launch RPCs that failed without proving the frame did not start, "
+                            + "by how the booking was resolved: running_kept, released, "
+                            + "unconfirmed_kept, released_unconfirmed (legacy behavior)")
+                    .labelNames("env", "cuebot_host", "resolution").register();
+
+    private static final Counter frameZombieRenderCounter = Counter.build()
+            .name("cue_frame_zombie_render_total")
+            .help("Host reports carrying a frame the DB no longer has RUNNING: RQD is rendering "
+                    + "something Cuebot has forgotten")
+            .labelNames("env", "cuebot_host").register();
+
     private static final Counter jobCompletedCounter =
             Counter.build().name("cue_jobs_completed_total").help("Total number of jobs completed")
                     .labelNames("env", "cuebot_host", "state", "show", "shot").register();
@@ -150,6 +199,36 @@ public class PrometheusMetricsCollector {
     private static final Counter hostReportsReceivedCounter = Counter.build()
             .name("cue_host_reports_received_total").help("Total number of host reports received")
             .labelNames("env", "cuebot_host", "facility").register();
+
+    // Layer start-after backoff (dispatcher.layer_delay.rules). The counter ticks once per real
+    // delay write (concurrent reports that no-op on the conditional monotonic write do not count);
+    // the gauge is the number of layers currently gated, served by the i_layer_start_after partial
+    // index. A layer stuck re-delaying shows as a flat non-zero gauge with a climbing counter.
+    private static final Counter layerDelaysTotal =
+            Counter.build().name("cuebot_layer_delays_total")
+                    .help("Number of automatic layer booking delays written, by exit status")
+                    .labelNames("env", "cuebot_hosts", "exit_status").register();
+    private static final Gauge layersDelayed = Gauge.build().name("cuebot_layers_delayed")
+            .help("Number of layers whose ts_start_after gate is currently in the future")
+            .labelNames("env", "cuebot_hosts").register();
+
+    // Memory-stranded cores: idle cores that cannot be booked because their host is out of memory.
+    // Reported per allocation.
+    private static final Gauge coresTotal =
+            Gauge.build().name("cue_cores_total").help("Total cores on UP and OPEN hosts")
+                    .labelNames("env", "cuebot_hosts", "alloc").register();
+    private static final Gauge coresIdle =
+            Gauge.build().name("cue_cores_idle").help("Idle cores on UP and OPEN hosts")
+                    .labelNames("env", "cuebot_hosts", "alloc").register();
+    private static final Gauge coresMemoryStranded = Gauge.build().name("cue_cores_memory_stranded")
+            .help("Idle cores on UP and OPEN hosts stranded by insufficient host memory")
+            .labelNames("env", "cuebot_hosts", "alloc").register();
+
+    private static final Logger logger = LogManager.getLogger(PrometheusMetricsCollector.class);
+
+    private HostManager hostManager;
+
+    private LayerDao layerDao;
 
     private String deployment_environment;
     private String cuebot_host;
@@ -251,6 +330,41 @@ public class PrometheusMetricsCollector {
                     .set(reportQueue.getTaskCount());
             reportQueueRejectedTotal.labels(this.deployment_environment, this.cuebot_host)
                     .set(reportQueue.getRejectedTaskCount());
+
+            // Memory-stranded cores, per allocation. Wrapped separately so a query failure does
+            // not prevent the queue metrics above from being collected. Core counts are stored in
+            // units of 100 (100 == one physical core), so divide to report whole cores. The gauges
+            // are cleared first so allocations that no longer have UP and OPEN hosts do not linger
+            // as stale series.
+            if (hostManager != null) {
+                try {
+                    java.util.List<StrandedCoreStats> strandedStats =
+                            hostManager.getStrandedCoreStats();
+                    coresTotal.clear();
+                    coresIdle.clear();
+                    coresMemoryStranded.clear();
+                    for (StrandedCoreStats stats : strandedStats) {
+                        coresTotal.labels(this.deployment_environment, this.cuebot_host,
+                                stats.allocName).set(stats.totalCores / 100.0);
+                        coresIdle.labels(this.deployment_environment, this.cuebot_host,
+                                stats.allocName).set(stats.idleCores / 100.0);
+                        coresMemoryStranded.labels(this.deployment_environment, this.cuebot_host,
+                                stats.allocName).set(stats.strandedCores / 100.0);
+                    }
+                } catch (Exception e) {
+                    logger.error("Failed to collect memory-stranded core metrics", e);
+                }
+            }
+
+            // Delayed-layer gauge, wrapped separately for the same reason as above.
+            if (layerDao != null) {
+                try {
+                    layersDelayed.labels(this.deployment_environment, this.cuebot_host)
+                            .set(layerDao.getDelayedLayerCount());
+                } catch (Exception e) {
+                    logger.error("Failed to collect delayed-layer metric", e);
+                }
+            }
         }
     }
 
@@ -299,6 +413,53 @@ public class PrometheusMetricsCollector {
             String frameId) {
         frameKillFailureCounter.labels(this.deployment_environment, this.cuebot_host, hostname,
                 jobName, frameName, frameId).inc();
+    }
+
+    /**
+     * Increment cue_frame_complete_superseded_total metric
+     *
+     * @param reason why the report was considered superseded ("no_owner" when the reporting proc
+     *        has no frame assigned, "other_frame" when it has moved on to a different frame)
+     */
+    public void incrementFrameCompleteSuperseded(String reason) {
+        frameCompleteSupersededCounter.labels(this.deployment_environment, this.cuebot_host, reason)
+                .inc();
+    }
+
+    /**
+     * Increment cue_frame_complete_dropped_total metric
+     *
+     * @param exitStatus the exit status of the report that could not be applied
+     */
+    public void incrementFrameCompleteDropped(int exitStatus) {
+        frameCompleteDroppedCounter
+                .labels(this.deployment_environment, this.cuebot_host, String.valueOf(exitStatus))
+                .inc();
+    }
+
+    /**
+     * Increment cue_frame_retry_deferred_total metric
+     */
+    public void incrementFrameRetryDeferred() {
+        frameRetryDeferredCounter.labels(this.deployment_environment, this.cuebot_host).inc();
+    }
+
+    /**
+     * Increment cue_frame_zombie_render_total metric
+     */
+    public void incrementFrameZombieRender() {
+        frameZombieRenderCounter.labels(this.deployment_environment, this.cuebot_host).inc();
+    }
+
+    /**
+     * Increment cue_frame_launch_outcome_unknown_total metric
+     *
+     * @param resolution how the booking was resolved (running_kept, released, unconfirmed_kept,
+     *        released_unconfirmed)
+     */
+    public void incrementFrameLaunchOutcomeUnknown(String resolution) {
+        frameLaunchOutcomeUnknownCounter
+                .labels(this.deployment_environment, this.cuebot_host, resolution).inc();
     }
 
     /**
@@ -368,6 +529,17 @@ public class PrometheusMetricsCollector {
     }
 
     /**
+     * Record an automatic layer booking delay (a real ts_start_after write, not a no-op)
+     *
+     * @param exitStatus the configured exit status that triggered the delay
+     */
+    public void recordLayerDelay(int exitStatus) {
+        layerDelaysTotal
+                .labels(this.deployment_environment, this.cuebot_host, String.valueOf(exitStatus))
+                .inc();
+    }
+
+    /**
      * Record a host report received
      *
      * @param facility facility name
@@ -392,5 +564,13 @@ public class PrometheusMetricsCollector {
 
     public void setReportQueue(HostReportQueue reportQueue) {
         this.reportQueue = reportQueue;
+    }
+
+    public void setHostManager(HostManager hostManager) {
+        this.hostManager = hostManager;
+    }
+
+    public void setLayerDao(LayerDao layerDao) {
+        this.layerDao = layerDao;
     }
 }
