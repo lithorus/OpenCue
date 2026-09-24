@@ -47,6 +47,8 @@ import com.imageworks.spcue.grpc.rqd.RqdStaticUnlockAllRequest;
 import com.imageworks.spcue.grpc.rqd.RqdStaticLaunchFrameRequest;
 import com.imageworks.spcue.grpc.rqd.RqdStaticRebootIdleRequest;
 import com.imageworks.spcue.grpc.rqd.RqdStaticRebootNowRequest;
+import com.imageworks.spcue.grpc.rqd.RqdStaticRestartIdleRequest;
+import com.imageworks.spcue.grpc.rqd.RqdStaticRestartNowRequest;
 import com.imageworks.spcue.grpc.rqd.RunFrame;
 import com.imageworks.spcue.grpc.rqd.RunningFrameGrpc;
 import com.imageworks.spcue.grpc.rqd.RunningFrameStatusRequest;
@@ -169,6 +171,34 @@ public final class RqdClientGrpc implements RqdClient {
         }
     }
 
+    public void restartRqdNow(HostInterface host) {
+        RqdStaticRestartNowRequest request = RqdStaticRestartNowRequest.newBuilder().build();
+
+        if (testMode) {
+            return;
+        }
+
+        try {
+            getStub(host.getName()).restartRqdNow(request);
+        } catch (StatusRuntimeException | ExecutionException e) {
+            throw new RqdClientException("failed to restart rqd on host: " + host.getName(), e);
+        }
+    }
+
+    public void restartRqdWhenIdle(HostInterface host) {
+        RqdStaticRestartIdleRequest request = RqdStaticRestartIdleRequest.newBuilder().build();
+
+        if (testMode) {
+            return;
+        }
+
+        try {
+            getStub(host.getName()).restartRqdIdle(request);
+        } catch (StatusRuntimeException | ExecutionException e) {
+            throw new RqdClientException("failed to restart rqd on host: " + host.getName(), e);
+        }
+    }
+
     public void killFrame(VirtualProc proc, String message) {
         killFrame(proc.hostName, proc.frameId, message);
     }
@@ -271,6 +301,13 @@ public final class RqdClientGrpc implements RqdClient {
         try {
             getStub(proc.hostName).launchFrame(request);
         } catch (StatusRuntimeException e) {
+            // Log the underlying cause: the caller only sees a generic
+            // RqdClientException, which hides why the launch failed (e.g. an
+            // EMFILE "Too many open files" once the per-host channel cache
+            // exhausts the process FD limit at large farm scale).
+            logger.warn(
+                    "failed to launch frame on " + proc.hostName + ":" + rqdServerPort + ": " + e,
+                    e);
             if (LAUNCH_OUTCOME_UNKNOWN_CODES.contains(e.getStatus().getCode())) {
                 throw new RqdLaunchUnknownOutcomeException(
                         "failed to launch frame " + frame.getFrameId() + " on " + proc.hostName
@@ -280,6 +317,9 @@ public final class RqdClientGrpc implements RqdClient {
             throw new RqdClientException("failed to launch frame", e);
         } catch (ExecutionException e) {
             // The channel could not even be created; the request was never sent.
+            logger.warn(
+                    "failed to launch frame on " + proc.hostName + ":" + rqdServerPort + ": " + e,
+                    e);
             throw new RqdClientException("failed to launch frame", e);
         }
     }

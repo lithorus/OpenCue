@@ -189,6 +189,7 @@
   </bean>
 
   <bean id="dispatchSupport" class="com.imageworks.spcue.dispatcher.DispatchSupportService">
+    <property name="killQueue" ref="killQueue" />
     <property name="dispatcherDao" ref="dispatcherDao" />
     <property name="jobDao" ref="jobDao" />
     <property name="frameDao" ref="frameDao" />
@@ -308,7 +309,10 @@
     <property name="reportQueue" ref="reportQueue" />
     <property name="hostManager" ref="hostManager" />
     <property name="layerDao" ref="layerDao" />
+    <property name="limitDao" ref="limitDao" />
   </bean>
+
+  <bean id="maestroMetrics" class="com.imageworks.spcue.dispatcher.MaestroMetrics" />
 
   <bean id="historicalManager" class="com.imageworks.spcue.service.HistoricalManagerService">
     <property name="historicalDao" ref="historicalDao" />
@@ -399,6 +403,18 @@
     <property name="kafkaEventPublisher" ref="kafkaEventPublisher" />
     <property name="prometheusMetrics" ref="prometheusMetricsCollector" />
     <property name="monitoringEventBuilder" ref="monitoringEventBuilder" />
+    <property name="limitRuleCache" ref="limitRuleCache" />
+    <property name="completionForwarder" ref="maestroCompletionForwarder" />
+  </bean>
+
+  <bean id="maestroCompletionForwarder" class="com.imageworks.spcue.dispatcher.MaestroCompletionForwarder" destroy-method="shutdown">
+    <property name="hostManager" ref="hostManager" />
+    <property name="showDao" ref="showDao" />
+    <property name="prometheusMetrics" ref="prometheusMetricsCollector" />
+  </bean>
+
+  <bean id="limitRuleCache" class="com.imageworks.spcue.dispatcher.LimitRuleCache">
+    <property name="limitDao" ref="limitDao" />
   </bean>
 
   <bean id="hostReportHandler" class="com.imageworks.spcue.dispatcher.HostReportHandler" destroy-method="shutdown">
@@ -418,6 +434,23 @@
     <property name="monitoringEventBuilder" ref="monitoringEventBuilder" />
   </bean>
 
+  <!-- Single-thread Maestro. Disabled by default (maestro.enabled).
+       When enabled, HostReportHandler suppresses the legacy per-host
+       BookingQueue enqueue, and the Quartz trigger below drives a single
+       tick that groups hosts by static spec and runs one candidate-layer
+       query per group. Cross-Cuebot exclusion via pg_try_advisory_lock. -->
+  <bean id="maestro" class="com.imageworks.spcue.dispatcher.Maestro" depends-on="cueDataSource"
+        destroy-method="onShutdown">
+    <property name="dataSource"  ref="cueDataSource" />
+    <property name="dispatcher"  ref="dispatcher" />
+    <property name="dispatchSupport" ref="dispatchSupport" />
+    <property name="hostManager" ref="hostManager" />
+    <property name="jobManager"  ref="jobManager" />
+    <property name="rqdClient"   ref="rqdClient" />
+    <property name="frameCompleteHandler" ref="frameCompleteHandler" />
+    <property name="maestroMetrics" ref="maestroMetrics" />
+  </bean>
+
   <!-- ##################################################################################### -->
   <!-- Timers -->
   <!-- ##################################################################################### -->
@@ -433,6 +466,7 @@
     <property name="jobManager" ref="jobManager" />
     <property name="dependManager" ref="dependManager" />
     <property name="rqdClient" ref="rqdClient" />
+    <property name="limitDao" ref="limitDao" />
   </bean>
 
   <bean id="hardwareCheck" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
@@ -520,6 +554,19 @@
     <property name="repeatInterval" value="60000"/>
     <!-- delay 30 seconds-->
     <property name="startDelay" value="30000" />
+  </bean>
+
+  <bean id="maestroTickJob" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
+    <property name="targetObject" ref="maestro" />
+    <property name="targetMethod" value="runTick" />
+    <!-- Tick is a no-op when maestro.enabled=false, so it is safe to
+         register the trigger unconditionally. -->
+    <property name="concurrent" value="false" />
+  </bean>
+
+  <bean id="maestroTrigger" class="org.springframework.scheduling.quartz.SimpleTriggerFactoryBean">
+    <property name="jobDetail" ref="maestroTickJob" />
+    <property name="repeatInterval" value="${maestro.interval_ms:1000}" />
   </bean>
 
   <bean id="reportQueueSchedule" class="org.springframework.scheduling.quartz.SimpleTriggerFactoryBean">
@@ -628,6 +675,20 @@
     <property name="repeatInterval" value="${maintenance.stuck_dependency_recovery_interval_ms}" />
   </bean>
 
+  <bean id="limitUsageRecalculation" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
+    <property name="targetObject" ref="maintenanceManager" />
+    <property name="targetMethod" value="recalculateLimitUsage" />
+    <property name="concurrent" value="false" />
+  </bean>
+
+  <bean id="limitUsageRecalculationTrigger" class="org.springframework.scheduling.quartz.SimpleTriggerFactoryBean">
+    <property name="jobDetail" ref="limitUsageRecalculation" />
+    <!-- delay 60 seconds to let the cue get up and running -->
+    <property name="startDelay" value="60000" />
+    <!-- repeat every limit.usage_refresh_seconds; the report path also refreshes synchronously -->
+    <property name="repeatInterval" value="#{${limit.usage_refresh_seconds:5} * 1000}" />
+  </bean>
+
   <bean id="orphanedFrameCheck" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
     <property name="targetObject" ref="maintenanceManager" />
     <property name="targetMethod" value="clearOrphanedFrames" />
@@ -664,6 +725,8 @@
         <ref bean="subscriptionRecalculationTrigger" />
         <ref bean="stuckDependencyRecoveryTrigger" />
         <ref bean="orphanedFrameCheckTrigger" />
+        <ref bean="maestroTrigger" />
+        <ref bean="limitUsageRecalculationTrigger" />
       </list>
     </property>
   </bean>

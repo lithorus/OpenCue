@@ -2,7 +2,7 @@
 title: "Monitoring with Prometheus, Loki, and Grafana"
 layout: default
 parent: Other Guides
-nav_order: 52
+nav_order: 70
 linkTitle: "Monitoring with Prometheus, Loki, and Grafana"
 date: 2021-08-01
 description: >
@@ -20,7 +20,7 @@ monitoring services.
 
 The sandbox deployment described here utilizes:
 
-* Prometheus for collecting metrics from the OpenCue database and scheduler.
+* Prometheus for collecting metrics from the OpenCue database and Cuebot.
 * Loki for collecting logs from all OpenCue components.
 * Grafana to provide an interface for querying and displaying the data send by the others.
 

@@ -29,7 +29,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.support.JdbcDaoSupport;
@@ -50,22 +49,14 @@ import com.imageworks.spcue.ResourceUsage;
 import com.imageworks.spcue.ShowInterface;
 import com.imageworks.spcue.TaskEntity;
 import com.imageworks.spcue.dao.JobDao;
-import com.imageworks.spcue.dao.ShowDao;
 import com.imageworks.spcue.grpc.job.FrameState;
 import com.imageworks.spcue.grpc.job.JobState;
-import com.imageworks.spcue.service.AccountingNotifier;
 import com.imageworks.spcue.util.CueUtil;
 import com.imageworks.spcue.util.JobLogUtil;
 import com.imageworks.spcue.util.SqlUtil;
 
 public class JobDaoJdbc extends JdbcDaoSupport implements JobDao {
     private static final Pattern LAST_JOB_STRIP_PATTERN = Pattern.compile("_v*([_0-9]*$)");
-
-    @Autowired
-    private ShowDao showDao;
-
-    @Autowired
-    private AccountingNotifier accountingNotifier;
 
     /*
      * Maps a row to a DispatchJob object
@@ -379,10 +370,6 @@ public class JobDaoJdbc extends JdbcDaoSupport implements JobDao {
     public void updateMaxCores(JobInterface j, int v) {
         getJdbcTemplate().update("UPDATE job_resource SET int_max_cores=? WHERE pk_job=?", v,
                 j.getJobId());
-
-        if (accountingNotifier.isEnabled() && showDao.isSchedulerManaged(j.getShowId())) {
-            accountingNotifier.notifyJobMaxCores(j.getJobId(), v);
-        }
     }
 
     @Override
@@ -411,10 +398,6 @@ public class JobDaoJdbc extends JdbcDaoSupport implements JobDao {
     public void updateMaxGpus(JobInterface j, int v) {
         getJdbcTemplate().update("UPDATE job_resource SET int_max_gpus=? WHERE pk_job=?", v,
                 j.getJobId());
-
-        if (accountingNotifier.isEnabled() && showDao.isSchedulerManaged(j.getShowId())) {
-            accountingNotifier.notifyJobMaxGpus(j.getJobId(), v);
-        }
     }
 
     @Override
@@ -1002,32 +985,67 @@ public class JobDaoJdbc extends JdbcDaoSupport implements JobDao {
                 job.getJobId());
     }
 
+    // spotless:off
+    private static final String UPDATE_JOB_USAGE_SUCCESS =
+            "UPDATE job_usage "
+            + "SET "
+                + "int_core_time_success = int_core_time_success + ?,"
+                + "int_gpu_time_success = int_gpu_time_success + ?,"
+                + "int_clock_time_success = int_clock_time_success + ?,"
+                + "int_frame_success_count = int_frame_success_count + 1 "
+            + "WHERE pk_job = ? ";
+    private static final String UPDATE_JOB_USAGE_HIGH =
+            "UPDATE job_usage "
+            + "SET int_clock_time_high = ? "
+            + "WHERE pk_job = ? "
+            + "AND int_clock_time_high < ?";
+    private static final String UPDATE_JOB_USAGE_FAIL =
+            "UPDATE job_usage "
+            + "SET "
+                + "int_core_time_fail = int_core_time_fail + ?,"
+                + "int_clock_time_fail = int_clock_time_fail + ?,"
+                + "int_frame_fail_count = int_frame_fail_count + 1 "
+            + "WHERE pk_job = ? ";
+    // The batch form: one row per job with both outcomes and the clock high, one statement.
+    private static final String UPDATE_JOB_USAGE_BATCH =
+            "UPDATE job_usage "
+            + "SET "
+                + "int_core_time_success = int_core_time_success + ?,"
+                + "int_gpu_time_success = int_gpu_time_success + ?,"
+                + "int_clock_time_success = int_clock_time_success + ?,"
+                + "int_frame_success_count = int_frame_success_count + ?,"
+                + "int_core_time_fail = int_core_time_fail + ?,"
+                + "int_clock_time_fail = int_clock_time_fail + ?,"
+                + "int_frame_fail_count = int_frame_fail_count + ?,"
+                + "int_clock_time_high = GREATEST(int_clock_time_high, ?) "
+            + "WHERE pk_job = ? ";
+    // spotless:on
+
     public void updateUsage(JobInterface job, ResourceUsage usage, int exitStatus) {
 
         if (exitStatus == 0) {
 
-            getJdbcTemplate().update(
-                    "UPDATE " + "job_usage " + "SET "
-                            + "int_core_time_success = int_core_time_success + ?,"
-                            + "int_gpu_time_success = int_gpu_time_success + ?,"
-                            + "int_clock_time_success = int_clock_time_success + ?,"
-                            + "int_frame_success_count = int_frame_success_count + 1 " + "WHERE "
-                            + "pk_job = ? ",
-                    usage.getCoreTimeSeconds(), usage.getGpuTimeSeconds(),
-                    usage.getClockTimeSeconds(), job.getJobId());
+            getJdbcTemplate().update(UPDATE_JOB_USAGE_SUCCESS, usage.getCoreTimeSeconds(),
+                    usage.getGpuTimeSeconds(), usage.getClockTimeSeconds(), job.getJobId());
 
-            getJdbcTemplate().update(
-                    "UPDATE " + "job_usage " + "SET " + "int_clock_time_high = ? " + "WHERE "
-                            + "pk_job = ? " + "AND " + "int_clock_time_high < ?",
-                    usage.getClockTimeSeconds(), job.getJobId(), usage.getClockTimeSeconds());
+            getJdbcTemplate().update(UPDATE_JOB_USAGE_HIGH, usage.getClockTimeSeconds(),
+                    job.getJobId(), usage.getClockTimeSeconds());
         } else {
 
-            getJdbcTemplate().update("UPDATE " + "job_usage " + "SET "
-                    + "int_core_time_fail = int_core_time_fail + ?,"
-                    + "int_clock_time_fail = int_clock_time_fail + ?,"
-                    + "int_frame_fail_count = int_frame_fail_count + 1 " + "WHERE " + "pk_job = ? ",
-                    usage.getCoreTimeSeconds(), usage.getClockTimeSeconds(), job.getJobId());
+            getJdbcTemplate().update(UPDATE_JOB_USAGE_FAIL, usage.getCoreTimeSeconds(),
+                    usage.getClockTimeSeconds(), job.getJobId());
         }
+    }
+
+    /**
+     * The batched form of updateUsage: one row per job, {coreTime, gpuTime, clockTime, successes,
+     * failCore, failClock, failures, high, pk_job}, in one statement for a whole scoop of
+     * completions, so the rows lock in the order they are given. The high only raises the column.
+     */
+    @Override
+    public void updateUsageBatch(List<Object[]> rows) {
+        if (!rows.isEmpty())
+            getJdbcTemplate().batchUpdate(UPDATE_JOB_USAGE_BATCH, rows);
     }
 
     public void updateEmail(JobInterface job, String email) {

@@ -30,6 +30,7 @@ import com.imageworks.spcue.LimitEntity;
 import com.imageworks.spcue.ResourceUsage;
 import com.imageworks.spcue.ThreadStats;
 import com.imageworks.spcue.grpc.job.LayerType;
+import com.imageworks.spcue.grpc.limit.LimitBindSource;
 
 public interface LayerDao {
 
@@ -400,6 +401,15 @@ public interface LayerDao {
     void updateUsage(LayerInterface layer, ResourceUsage usage, int exitStatus);
 
     /**
+     * The batched form of updateUsage: one statement, one JDBC round trip, for a whole batch of
+     * completions, one row per layer carrying both outcomes and the clock extremes. Rows are
+     * {successCore, successGpu, successClock, successes, failCore, failClock, failures, high,
+     * successes, low, pk_layer}: the high only raises the column, the low moves only for a row with
+     * successes (the second successes is its guard) and a zero low counts as unset.
+     */
+    void updateUsageBatch(java.util.List<Object[]> rows);
+
+    /**
      * Returns true of the layer is launching.
      *
      * @param l
@@ -466,12 +476,22 @@ public interface LayerDao {
     void updateLayerMaxGpus(LayerInterface layer, int val);
 
     /**
-     * Add a limit to the given layer.
+     * Add a limit to the given layer, recording it as a spec-declared binding.
      *
+     * @deprecated use the overload taking a {@link LimitBindSource}.
      * @param layer
      * @param limit_id
      */
+    @Deprecated
     void addLimit(LayerInterface layer, String limitId);
+
+    /**
+     * Bind a layer to a limit. Idempotent: an existing binding is left untouched, including its
+     * original source, so a submitter's declaration is never downgraded to a machine's guess.
+     *
+     * @return true if a new binding was created.
+     */
+    boolean addLimit(LayerInterface layer, String limitId, LimitBindSource source);
 
     /**
      * Remove a limit to the given layer.

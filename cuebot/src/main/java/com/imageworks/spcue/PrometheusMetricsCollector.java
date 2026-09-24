@@ -22,6 +22,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import com.imageworks.spcue.dao.LayerDao;
+import com.imageworks.spcue.dao.LimitDao;
 import com.imageworks.spcue.dispatcher.BookingQueue;
 import com.imageworks.spcue.dispatcher.DispatchQueue;
 import com.imageworks.spcue.dispatcher.HostReportHandler;
@@ -148,6 +149,14 @@ public class PrometheusMetricsCollector {
                     + "the reported frame (the run was superseded)")
             .labelNames("env", "cuebot_host", "reason").register();
 
+    private static final Counter completionForwardCounter = Counter.build()
+            .name("cue_completion_forward_total")
+            .help("Managed-show frame complete reports offered to the Maestro completion-forward "
+                    + "relay: forwarded (ACKed by the isolated deployment), fallback_error "
+                    + "(forward failed, processed locally), fallback_breaker (breaker open, "
+                    + "processed locally without a forward attempt)")
+            .labelNames("env", "cuebot_host", "outcome").register();
+
     private static final Counter frameCompleteDroppedCounter =
             Counter.build().name("cue_frame_complete_dropped_total")
                     .help("Frame complete reports that could not be applied to their frame; "
@@ -212,6 +221,27 @@ public class PrometheusMetricsCollector {
             .help("Number of layers whose ts_start_after gate is currently in the future")
             .labelNames("env", "cuebot_hosts").register();
 
+    // Limit discovery and usage. The auto-tag counter ticks once per NEW binding, so it measures
+    // discovery rate rather than failure rate; watching cue_limit_bound_layers plateau is how a
+    // site knows discovery has converged and enforcement can be considered.
+    private static final Counter limitAutoTagTotal =
+            Counter.build().name("cuebot_limit_auto_tag_total")
+                    .help("Layers auto-bound to a limit after failing with its exit status")
+                    .labelNames("env", "cuebot_hosts", "limit").register();
+    private static final Counter limitDelaysTotal =
+            Counter.build().name("cuebot_limit_delays_total")
+                    .help("Automatic layer booking delays written by a limit's failure rule")
+                    .labelNames("env", "cuebot_hosts", "limit", "exit_status").register();
+    private static final Gauge limitBoundLayers = Gauge.build().name("cue_limit_bound_layers")
+            .help("Layers currently bound to a limit, by binding origin")
+            .labelNames("env", "cuebot_hosts", "limit", "source").register();
+    private static final Gauge limitUsage = Gauge.build().name("cue_limit_usage")
+            .help("Limit usage split into settled (license server) and pending (recent bookings)")
+            .labelNames("env", "cuebot_hosts", "limit", "kind").register();
+    private static final Gauge limitReportStale = Gauge.build().name("cue_limit_report_stale")
+            .help("1 when the limit's external report is older than its TTL")
+            .labelNames("env", "cuebot_hosts", "limit").register();
+
     // Memory-stranded cores: idle cores that cannot be booked because their host is out of memory.
     // Reported per allocation.
     private static final Gauge coresTotal =
@@ -229,6 +259,8 @@ public class PrometheusMetricsCollector {
     private HostManager hostManager;
 
     private LayerDao layerDao;
+
+    private LimitDao limitDao;
 
     private String deployment_environment;
     private String cuebot_host;
@@ -365,6 +397,32 @@ public class PrometheusMetricsCollector {
                     logger.error("Failed to collect delayed-layer metric", e);
                 }
             }
+
+            // Limit coverage and usage gauges, cleared first so deleted limits do not linger as
+            // stale series.
+            if (limitDao != null) {
+                try {
+                    java.util.List<LimitEntity> limits = limitDao.getLimits();
+                    limitBoundLayers.clear();
+                    limitUsage.clear();
+                    limitReportStale.clear();
+                    for (LimitEntity limit : limits) {
+                        limitBoundLayers.labels(this.deployment_environment, this.cuebot_host,
+                                limit.name, "SPEC").set(limit.specLayerCount);
+                        limitBoundLayers.labels(this.deployment_environment, this.cuebot_host,
+                                limit.name, "AUTO").set(limit.autoLayerCount);
+                        limitUsage.labels(this.deployment_environment, this.cuebot_host, limit.name,
+                                "settled").set(limit.settledUsage);
+                        limitUsage.labels(this.deployment_environment, this.cuebot_host, limit.name,
+                                "pending").set(limit.pendingUsage);
+                        limitReportStale
+                                .labels(this.deployment_environment, this.cuebot_host, limit.name)
+                                .set(limit.isReportStale() ? 1 : 0);
+                    }
+                } catch (Exception e) {
+                    logger.error("Failed to collect limit metrics", e);
+                }
+            }
         }
     }
 
@@ -423,6 +481,17 @@ public class PrometheusMetricsCollector {
      */
     public void incrementFrameCompleteSuperseded(String reason) {
         frameCompleteSupersededCounter.labels(this.deployment_environment, this.cuebot_host, reason)
+                .inc();
+    }
+
+    /**
+     * Increment cue_completion_forward_total metric
+     *
+     * @param outcome what became of the managed-show report: "forwarded", "fallback_error" or
+     *        "fallback_breaker"
+     */
+    public void incrementCompletionForward(String outcome) {
+        completionForwardCounter.labels(this.deployment_environment, this.cuebot_host, outcome)
                 .inc();
     }
 
@@ -540,6 +609,27 @@ public class PrometheusMetricsCollector {
     }
 
     /**
+     * Record a layer booking delay written by a limit's failure rule.
+     *
+     * @param limitName the limit whose rule matched the exit status
+     * @param exitStatus the exit status that triggered the delay
+     */
+    public void recordLimitDelay(String limitName, int exitStatus) {
+        limitDelaysTotal.labels(this.deployment_environment, this.cuebot_host, limitName,
+                String.valueOf(exitStatus)).inc();
+    }
+
+    /**
+     * Record a layer auto-bound to a limit. Incremented once per new binding, never for the repeat
+     * failures of an already-bound layer.
+     *
+     * @param limitName the limit the layer was bound to
+     */
+    public void recordLimitAutoTag(String limitName) {
+        limitAutoTagTotal.labels(this.deployment_environment, this.cuebot_host, limitName).inc();
+    }
+
+    /**
      * Record a host report received
      *
      * @param facility facility name
@@ -572,5 +662,9 @@ public class PrometheusMetricsCollector {
 
     public void setLayerDao(LayerDao layerDao) {
         this.layerDao = layerDao;
+    }
+
+    public void setLimitDao(LimitDao limitDao) {
+        this.limitDao = limitDao;
     }
 }

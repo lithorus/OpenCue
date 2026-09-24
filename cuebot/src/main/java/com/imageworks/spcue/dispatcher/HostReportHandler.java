@@ -101,6 +101,16 @@ public class HostReportHandler {
     @Autowired
     private PrometheusMetricsCollector prometheusMetrics;
 
+    // Live farm-health ledger for the in-process scheduler's metrics; optional
+    // so report handling never depends on it.
+    @Autowired(required = false)
+    private FarmHealth farmHealth;
+
+    // Live per-layer rss ledger for the scheduler's launch-time core grant; optional
+    // so report handling never depends on it.
+    @Autowired(required = false)
+    private LayerLiveMem layerLiveMem;
+
     // Reconcile idle resources roughly every 10 minutes per host.
     // Host reports arrive ~every 10s, so this fires ~1 in 60 reports.
     private static final long RECONCILE_INTERVAL_MS = 600_000;
@@ -173,6 +183,10 @@ public class HostReportHandler {
 
     public void handleHostReport(HostReport report, boolean isBoot) {
         long startTime = System.currentTimeMillis();
+        if (farmHealth != null)
+            farmHealth.record(report.getHost());
+        if (layerLiveMem != null)
+            layerLiveMem.record(report.getFramesList());
         try {
             // Record Prometheus metric for host report
             if (prometheusMetrics != null) {
@@ -318,8 +332,18 @@ public class HostReportHandler {
                 msg = "The cue has no pending jobs";
             }
 
+            // When Maestro owns the whole facility it owns dispatch:
+            // suppress the legacy per-host BookingQueue enqueue so the two paths
+            // never both run. Short of that the legacy dispatcher still books, and
+            // the split is enforced per show in SQL rather than by this Cuebot's
+            // maestro.enabled: every legacy job-selection query (FIND_SHOWS for the
+            // all-shows path, FIND_JOBS_BY_SHOW/BY_GROUP for the preferred-show and
+            // redirect paths below) excludes b_scheduler_managed shows. That has to
+            // hold on Cuebots running with Maestro off too, since during a rollout
+            // one Cuebot plans and the rest report and forward to it.
             boolean bookingOff =
-                    env.getProperty("dispatcher.turn_off_booking", Boolean.class, false);
+                    env.getProperty("dispatcher.turn_off_booking", Boolean.class, false)
+                            || MaestroMode.facility(env);
             /*
              * If a message was set, the host is not bookable. Log the message and move on.
              */
@@ -342,7 +366,9 @@ public class HostReportHandler {
                 }
 
                 /*
-                 * Check if the host prefers a show. If it does , dispatch to that show first.
+                 * Check if the host prefers a show. If it does , dispatch to that show first. A
+                 * Maestro-managed preferred show yields no jobs here (the by-show query excludes
+                 * it) and DispatchBookHost falls through to the remaining, Cuebot-owned work.
                  */
                 if (hostManager.isPreferShow(host)) {
                     bookingQueue.execute(new DispatchBookHost(host,
