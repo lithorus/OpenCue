@@ -57,6 +57,7 @@ class StatusCode(enum.IntEnum):
 
     @classmethod
     def from_int(cls, value):
+        """Returns the corresponding StatusCode enum for the integer value."""
         try:
             return cls(int(value))
         except (ValueError, TypeError):
@@ -72,9 +73,11 @@ class RpcError(Exception):
         self._details = details
 
     def code(self):
+        """Returns the status code of the RPC error."""
         return self._code
 
     def details(self):
+        """Returns the detail message of the RPC error."""
         return self._details
 
     def __str__(self):
@@ -98,6 +101,7 @@ class UnaryUnaryClientInterceptor(object):
     """Base class for unary-unary client interceptors."""
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
+        """Intercepts a unary-unary RPC call before invocation."""
         return continuation(client_call_details, request)
 
 
@@ -141,7 +145,7 @@ def _unframe_message(data, encoding=None, max_length=None):
     if len(data) < 5:
         raise RpcError(StatusCode.INTERNAL, "Incomplete gRPC frame (%d bytes)" % len(data))
     compressed, length = struct.unpack(">BI", data[:5])
-    if max_length is not None and max_length > 0 and length > max_length:
+    if max_length and (0 < max_length < length):
         raise RpcError(
             StatusCode.RESOURCE_EXHAUSTED,
             "Received message larger than max (%d vs. %d)" % (length, max_length),
@@ -220,7 +224,10 @@ class _Http2Connection(object):
         return remaining
 
     def _read_events(self, deadline):
+        """Reads incoming socket data and returns decoded H2 events."""
         self._sock.settimeout(self._remaining_timeout(deadline))
+        if deadline is not None and (0 < deadline < time.monotonic()):
+            raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         try:
             raw = self._sock.recv(65536)
         except socket.timeout:
@@ -234,7 +241,8 @@ class _Http2Connection(object):
 
     def call(self, method_path, payload, timeout=None, max_send_length=None, max_recv_length=None,
              reused=False):
-        if max_send_length is not None and max_send_length > 0 and len(payload) > max_send_length:
+        """Executes an RPC call over HTTP/2."""
+        if max_send_length and (0 < max_send_length < len(payload)):
             raise RpcError(
                 StatusCode.RESOURCE_EXHAUSTED,
                 "Sent message larger than max (%d vs. %d)" % (len(payload), max_send_length),
@@ -342,7 +350,8 @@ class _Http2Connection(object):
                 raise _StreamResetBeforeResponse(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
 
-        if stream_reset is not None and not trailing_headers and "grpc-status" not in initial_headers:
+        if (stream_reset is not None and not trailing_headers
+                and "grpc-status" not in initial_headers):
             if stream_reset == h2.errors.ErrorCodes.CANCEL:
                 raise RpcError(StatusCode.CANCELLED, "Stream cancelled")
             if stream_reset == h2.errors.ErrorCodes.REFUSED_STREAM:
@@ -383,6 +392,7 @@ class _Http2Connection(object):
         )
 
     def close(self):
+        """Closes the underlying socket and terminates the HTTP/2 connection."""
         if self.closed:
             return
         self.closed = True
@@ -490,6 +500,7 @@ class Http2Channel(object):
             self._release(conn)
 
     def unary_unary(self, method, request_serializer=None, response_deserializer=None):
+        """Returns a callable for a unary-unary RPC method."""
         return _UnaryUnaryMultiCallable(
             self,
             method,
@@ -498,6 +509,7 @@ class Http2Channel(object):
         )
 
     def close(self):
+        """Closes all pooled connections and marks channel as closed."""
         with self._lock:
             self._closed = True
             while self._pool:
@@ -512,6 +524,7 @@ class _InterceptedUnaryUnaryCallable(object):
         self._interceptors = list(interceptors)
 
     def __call__(self, request, timeout=None, metadata=None, credentials=None):
+        """Invokes the intercepted unary-unary RPC callable."""
         call_details = ClientCallDetails(
             method=self._method,
             timeout=timeout,
@@ -545,6 +558,7 @@ class InterceptedChannel(object):
         self._interceptors = list(interceptors)
 
     def unary_unary(self, method, request_serializer=None, response_deserializer=None):
+        """Creates an intercepted unary-unary callable for the given method."""
         base_callable = self._channel.unary_unary(
             method,
             request_serializer=request_serializer,
@@ -553,14 +567,17 @@ class InterceptedChannel(object):
         return _InterceptedUnaryUnaryCallable(method, base_callable, self._interceptors)
 
     def close(self):
+        """Closes the underlying channel."""
         self._channel.close()
 
 
 def insecure_channel(target, options=None):
+    """Creates an insecure HTTP/2 channel to the target host and port."""
     return Http2Channel(target, options=options)
 
 
 def intercept_channel(channel, *interceptors):
+    """Wraps an existing channel with the provided client interceptors."""
     return InterceptedChannel(channel, interceptors)
 
 

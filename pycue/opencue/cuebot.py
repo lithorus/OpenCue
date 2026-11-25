@@ -355,6 +355,7 @@ class RetryOnRpcErrorClientInterceptor(rpc.UnaryUnaryClientInterceptor):
                     raise
 
                 self._sleeping_policy.sleep(attempt)
+        return None
 
     def intercept_unary_unary(self, continuation, client_call_details,
                               request):
