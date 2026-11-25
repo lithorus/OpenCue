@@ -31,14 +31,14 @@ import time
 import sys
 
 import opencue_proto.report_pb2
+from opencue_proto import rpc
 import rqd.rqconstants
-import rqd.rqrpc
 
 
 class RqdReportStaticServer(object):
 
     def __init__(self):
-        self.server = rqd.rqrpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        self.server = rpc.server(futures.ThreadPoolExecutor(max_workers=1))
         self.servicerName = 'RqdReportInterfaceServicer'
         self.servicer = None
         self.server.add_insecure_port('[::]:{0}'.format(rqd.rqconstants.CUEBOT_GRPC_PORT))

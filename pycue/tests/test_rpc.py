@@ -178,6 +178,7 @@ class _MiniHttp2GrpcServer(object):
                     conn_sock.sendall(out)
                 for event in events:
                     if self._handle_event(event, streams, conn, conn_sock):
+                        time.sleep(0.05)
                         return
         except (OSError, h2.exceptions.H2Error):
             pass
@@ -232,7 +233,7 @@ class RpcTransportTests(unittest.TestCase):
             host_pb2.Host(id="id-%04d" % i, name="host-%04d-" % i + ("x" * 180))
             for i in range(900)
         ]
-        large_resp = host_pb2.HostGetHostsResponse(hosts=host_pb2.HostSeq(nested=hosts))
+        large_resp = host_pb2.HostGetHostsResponse(hosts=host_pb2.HostSeq(hosts=hosts))
         self.assertGreater(len(large_resp.SerializeToString()), 150000)
 
         def handler(_headers, payload):
@@ -248,8 +249,8 @@ class RpcTransportTests(unittest.TestCase):
             req.r.hosts.extend(["h-%04d-%s" % (i, "y" * 200) for i in range(450)])
             self.assertGreater(len(req.SerializeToString()), 80000)
             resp = stub.GetHosts(req, timeout=10)
-            self.assertEqual(900, len(resp.hosts.nested))
-            self.assertEqual("id-0899", resp.hosts.nested[-1].id)
+            self.assertEqual(900, len(resp.hosts.hosts))
+            self.assertEqual("id-0899", resp.hosts.hosts[-1].id)
         finally:
             channel.close()
             srv.stop()
@@ -351,7 +352,7 @@ class RpcTransportTests(unittest.TestCase):
         def handler(_headers, _payload):
             resp = host_pb2.HostGetHostsResponse(
                 hosts=host_pb2.HostSeq(
-                    nested=[host_pb2.Host(id="h1", name="host-name-exceeds-limit")]
+                    hosts=[host_pb2.Host(id="h1", name="host-name-exceeds-limit")]
                 )
             )
             return rpc.StatusCode.OK, "", resp.SerializeToString(), False
