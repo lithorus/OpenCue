@@ -14,9 +14,9 @@
 
 """Module for classes related to services."""
 
+from opencue_proto import rpc
 from opencue_proto import service_pb2
 from opencue.cuebot import Cuebot
-from opencue import rpc
 
 
 class Service(object):

@@ -26,8 +26,8 @@ import uuid
 import mock
 
 from opencue_proto import job_pb2
-import opencue.exception
 from opencue_proto import rpc
+import opencue.exception
 from opencue.wrappers.job import Job
 
 

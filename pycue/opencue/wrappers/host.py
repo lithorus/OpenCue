@@ -21,10 +21,10 @@ from builtins import input
 
 from opencue_proto import comment_pb2
 from opencue_proto import host_pb2
+from opencue_proto import rpc
 from opencue import Cuebot
 from opencue import util
 from opencue import search
-from opencue import rpc
 import opencue.wrappers.comment
 # pylint: disable=cyclic-import
 import opencue.wrappers.deed

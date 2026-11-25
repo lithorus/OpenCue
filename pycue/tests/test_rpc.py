@@ -14,7 +14,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""Tests for `opencue.rpc` pure-Python HTTP/2 transport."""
+"""Tests for `rpc` pure-Python HTTP/2 transport."""
 
 # pylint: disable=no-member,too-few-public-methods
 
@@ -38,9 +38,9 @@ import mock
 
 from opencue_proto import cue_pb2
 from opencue_proto import host_pb2
+from opencue_proto import rpc
 import opencue
 import opencue.cuebot
-import opencue.rpc
 
 
 class _MiniHttp2GrpcServer(object):
@@ -74,7 +74,7 @@ class _MiniHttp2GrpcServer(object):
             self._threads.append(t)
 
     def _send_grpc_response(self, conn_sock, conn, stream_id, status, message, resp_payload):
-        if status != opencue.rpc.StatusCode.OK:
+        if status != rpc.StatusCode.OK:
             trailers = [
                 (":status", "200"),
                 ("content-type", "application/grpc"),
@@ -194,7 +194,7 @@ class _MiniHttp2GrpcServer(object):
 
 
 class RpcTransportTests(unittest.TestCase):
-    """End-to-end tests for `opencue.rpc` HTTP/2 transport."""
+    """End-to-end tests for `rpc` HTTP/2 transport."""
 
     def test_unary_rpc_and_connection_pooling(self):
         received_paths = []
@@ -205,10 +205,10 @@ class RpcTransportTests(unittest.TestCase):
             resp = cue_pb2.CueGetSystemStatsResponse(
                 stats=cue_pb2.SystemStats(manage_waiting=42, booked_procs=7)
             )
-            return opencue.rpc.StatusCode.OK, "", resp.SerializeToString(), False
+            return rpc.StatusCode.OK, "", resp.SerializeToString(), False
 
         srv = _MiniHttp2GrpcServer(handler)
-        channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
             resp1 = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
@@ -235,10 +235,10 @@ class RpcTransportTests(unittest.TestCase):
         def handler(_headers, payload):
             req = host_pb2.HostGetHostsRequest.FromString(payload)
             self.assertGreater(len(req.r.hosts), 10)
-            return opencue.rpc.StatusCode.OK, "", large_resp.SerializeToString(), False
+            return rpc.StatusCode.OK, "", large_resp.SerializeToString(), False
 
         srv = _MiniHttp2GrpcServer(handler)
-        channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](channel)
             req = host_pb2.HostGetHostsRequest()
@@ -254,19 +254,19 @@ class RpcTransportTests(unittest.TestCase):
     def test_non_ok_status_and_percent_encoded_details(self):
         def handler(_headers, _payload):
             return (
-                opencue.rpc.StatusCode.NOT_FOUND,
+                rpc.StatusCode.NOT_FOUND,
                 "Job not found: my_job%42",
                 b"",
                 False,
             )
 
         srv = _MiniHttp2GrpcServer(handler)
-        channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
-            with self.assertRaises(opencue.rpc.RpcError) as ctx:
+            with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
-            self.assertEqual(opencue.rpc.StatusCode.NOT_FOUND, ctx.exception.code())
+            self.assertEqual(rpc.StatusCode.NOT_FOUND, ctx.exception.code())
             self.assertEqual("Job not found: my_job%42", ctx.exception.details())
         finally:
             channel.close()
@@ -278,11 +278,11 @@ class RpcTransportTests(unittest.TestCase):
         def handler(_headers, _payload):
             attempts[0] += 1
             if attempts[0] < 3:
-                return opencue.rpc.StatusCode.UNAVAILABLE, "transient", b"", False
+                return rpc.StatusCode.UNAVAILABLE, "transient", b"", False
             resp = cue_pb2.CueGetSystemStatsResponse(
                 stats=cue_pb2.SystemStats(manage_threads=9)
             )
-            return opencue.rpc.StatusCode.OK, "", resp.SerializeToString(), False
+            return rpc.StatusCode.OK, "", resp.SerializeToString(), False
 
         srv = _MiniHttp2GrpcServer(handler)
         interceptor = opencue.cuebot.RetryOnRpcErrorClientInterceptor(
@@ -290,10 +290,10 @@ class RpcTransportTests(unittest.TestCase):
             sleeping_policy=opencue.cuebot.ExponentialBackoff(
                 init_backoff_ms=1, max_backoff_ms=5, multiplier=2
             ),
-            status_for_retry=(opencue.rpc.StatusCode.UNAVAILABLE,),
+            status_for_retry=(rpc.StatusCode.UNAVAILABLE,),
         )
-        base_channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
-        channel = opencue.rpc.intercept_channel(base_channel, interceptor)
+        base_channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.intercept_channel(base_channel, interceptor)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
             resp = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
@@ -305,7 +305,7 @@ class RpcTransportTests(unittest.TestCase):
 
     def test_retry_interceptor_raises_on_exhaustion_or_non_retryable(self):
         def always_unavailable(_headers, _payload):
-            return opencue.rpc.StatusCode.UNAVAILABLE, "still down", b"", False
+            return rpc.StatusCode.UNAVAILABLE, "still down", b"", False
 
         srv = _MiniHttp2GrpcServer(always_unavailable)
         interceptor = opencue.cuebot.RetryOnRpcErrorClientInterceptor(
@@ -313,16 +313,16 @@ class RpcTransportTests(unittest.TestCase):
             sleeping_policy=opencue.cuebot.ExponentialBackoff(
                 init_backoff_ms=1, max_backoff_ms=2, multiplier=2
             ),
-            status_for_retry=(opencue.rpc.StatusCode.UNAVAILABLE,),
+            status_for_retry=(rpc.StatusCode.UNAVAILABLE,),
         )
-        channel = opencue.rpc.intercept_channel(
-            opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port), interceptor
+        channel = rpc.intercept_channel(
+            rpc.insecure_channel("127.0.0.1:%d" % srv.port), interceptor
         )
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
-            with self.assertRaises(opencue.rpc.RpcError) as ctx:
+            with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
-            self.assertEqual(opencue.rpc.StatusCode.UNAVAILABLE, ctx.exception.code())
+            self.assertEqual(rpc.StatusCode.UNAVAILABLE, ctx.exception.code())
             self.assertEqual("still down", ctx.exception.details())
         finally:
             channel.close()
@@ -331,15 +331,15 @@ class RpcTransportTests(unittest.TestCase):
     def test_timeout_raises_deadline_exceeded(self):
         def slow_handler(_headers, _payload):
             time.sleep(0.4)
-            return opencue.rpc.StatusCode.OK, "", b"", False
+            return rpc.StatusCode.OK, "", b"", False
 
         srv = _MiniHttp2GrpcServer(slow_handler)
-        channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
-            with self.assertRaises(opencue.rpc.RpcError) as ctx:
+            with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=0.05)
-            self.assertEqual(opencue.rpc.StatusCode.DEADLINE_EXCEEDED, ctx.exception.code())
+            self.assertEqual(rpc.StatusCode.DEADLINE_EXCEEDED, ctx.exception.code())
         finally:
             channel.close()
             srv.stop()
@@ -349,27 +349,27 @@ class RpcTransportTests(unittest.TestCase):
             resp = host_pb2.HostGetHostsResponse(
                 hosts=[host_pb2.Host(id="h1", name="host-name-exceeds-limit")]
             )
-            return opencue.rpc.StatusCode.OK, "", resp.SerializeToString(), False
+            return rpc.StatusCode.OK, "", resp.SerializeToString(), False
 
         srv = _MiniHttp2GrpcServer(handler)
-        send_limited = opencue.rpc.insecure_channel(
+        send_limited = rpc.insecure_channel(
             "127.0.0.1:%d" % srv.port, options=[("grpc.max_send_message_length", 5)]
         )
-        recv_limited = opencue.rpc.insecure_channel(
+        recv_limited = rpc.insecure_channel(
             "127.0.0.1:%d" % srv.port, options=[("grpc.max_receive_message_length", 5)]
         )
         try:
             send_stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](send_limited)
             req = host_pb2.HostGetHostsRequest()
             req.r.hosts.append("longer-than-five-bytes")
-            with self.assertRaises(opencue.rpc.RpcError) as send_ctx:
+            with self.assertRaises(rpc.RpcError) as send_ctx:
                 send_stub.GetHosts(req, timeout=5)
-            self.assertEqual(opencue.rpc.StatusCode.RESOURCE_EXHAUSTED, send_ctx.exception.code())
+            self.assertEqual(rpc.StatusCode.RESOURCE_EXHAUSTED, send_ctx.exception.code())
 
             recv_stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](recv_limited)
-            with self.assertRaises(opencue.rpc.RpcError) as recv_ctx:
+            with self.assertRaises(rpc.RpcError) as recv_ctx:
                 recv_stub.GetHosts(host_pb2.HostGetHostsRequest(), timeout=5)
-            self.assertEqual(opencue.rpc.StatusCode.RESOURCE_EXHAUSTED, recv_ctx.exception.code())
+            self.assertEqual(rpc.StatusCode.RESOURCE_EXHAUSTED, recv_ctx.exception.code())
         finally:
             send_limited.close()
             recv_limited.close()
@@ -384,10 +384,10 @@ class RpcTransportTests(unittest.TestCase):
                 stats=cue_pb2.SystemStats(booked_procs=calls[0])
             )
             # Force connection drop right after first response so second call hits stale socket
-            return opencue.rpc.StatusCode.OK, "", resp.SerializeToString(), (calls[0] == 1)
+            return rpc.StatusCode.OK, "", resp.SerializeToString(), (calls[0] == 1)
 
         srv = _MiniHttp2GrpcServer(handler)
-        channel = opencue.rpc.insecure_channel("127.0.0.1:%d" % srv.port)
+        channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
             stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
             first = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)

@@ -37,6 +37,7 @@ from opencue_proto import host_pb2
 from opencue_proto import job_pb2
 from opencue_proto import limit_pb2
 from opencue_proto import renderPartition_pb2
+from opencue_proto import rpc
 from opencue_proto import service_pb2
 from opencue_proto import show_pb2
 from opencue_proto import subscription_pb2
@@ -45,7 +46,6 @@ from opencue_proto import monitoring_pb2
 from opencue.exception import ConnectionException
 from opencue.exception import CueException
 import opencue.config
-from opencue_proto import rpc
 
 
 __all__ = ["Cuebot"]

@@ -34,8 +34,8 @@ from xml.etree import ElementTree as Et
 
 from packaging.version import Version
 
-import FileSequence
 import opencue
+import FileSequence
 
 import outline
 import outline.depend

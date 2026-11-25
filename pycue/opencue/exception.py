@@ -18,8 +18,8 @@ from __future__ import print_function
 from __future__ import division
 from __future__ import absolute_import
 
-import opencue
 from opencue_proto import rpc
+import opencue
 
 
 class CueException(Exception):
