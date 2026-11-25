@@ -42,6 +42,9 @@ from opencue_proto import rpc
 import opencue
 import opencue.cuebot
 
+_CueStub = rpc.stub_factory(cue_pb2, "CueInterface")
+_HostStub = rpc.stub_factory(host_pb2, "HostInterface")
+
 
 class _MiniHttp2GrpcServer(object):
     """Minimal HTTP/2 gRPC test server powered by h2 for client transport tests."""
@@ -210,7 +213,7 @@ class RpcTransportTests(unittest.TestCase):
         srv = _MiniHttp2GrpcServer(handler)
         channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             resp1 = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             resp2 = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             self.assertEqual(42, resp1.stats.manage_waiting)
@@ -229,7 +232,7 @@ class RpcTransportTests(unittest.TestCase):
             host_pb2.Host(id="id-%04d" % i, name="host-%04d-" % i + ("x" * 180))
             for i in range(900)
         ]
-        large_resp = host_pb2.HostGetHostsResponse(hosts=hosts)
+        large_resp = host_pb2.HostGetHostsResponse(hosts=host_pb2.HostSeq(nested=hosts))
         self.assertGreater(len(large_resp.SerializeToString()), 150000)
 
         def handler(_headers, payload):
@@ -240,13 +243,13 @@ class RpcTransportTests(unittest.TestCase):
         srv = _MiniHttp2GrpcServer(handler)
         channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](channel)
+            stub = _HostStub(channel)
             req = host_pb2.HostGetHostsRequest()
             req.r.hosts.extend(["h-%04d-%s" % (i, "y" * 200) for i in range(450)])
             self.assertGreater(len(req.SerializeToString()), 80000)
             resp = stub.GetHosts(req, timeout=10)
-            self.assertEqual(900, len(resp.hosts))
-            self.assertEqual("id-0899", resp.hosts[-1].id)
+            self.assertEqual(900, len(resp.hosts.nested))
+            self.assertEqual("id-0899", resp.hosts.nested[-1].id)
         finally:
             channel.close()
             srv.stop()
@@ -263,7 +266,7 @@ class RpcTransportTests(unittest.TestCase):
         srv = _MiniHttp2GrpcServer(handler)
         channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             self.assertEqual(rpc.StatusCode.NOT_FOUND, ctx.exception.code())
@@ -295,7 +298,7 @@ class RpcTransportTests(unittest.TestCase):
         base_channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         channel = rpc.intercept_channel(base_channel, interceptor)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             resp = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             self.assertEqual(3, attempts[0])
             self.assertEqual(9, resp.stats.manage_threads)
@@ -319,7 +322,7 @@ class RpcTransportTests(unittest.TestCase):
             rpc.insecure_channel("127.0.0.1:%d" % srv.port), interceptor
         )
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             self.assertEqual(rpc.StatusCode.UNAVAILABLE, ctx.exception.code())
@@ -336,7 +339,7 @@ class RpcTransportTests(unittest.TestCase):
         srv = _MiniHttp2GrpcServer(slow_handler)
         channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=0.05)
             self.assertEqual(rpc.StatusCode.DEADLINE_EXCEEDED, ctx.exception.code())
@@ -347,7 +350,9 @@ class RpcTransportTests(unittest.TestCase):
     def test_max_message_length_enforced(self):
         def handler(_headers, _payload):
             resp = host_pb2.HostGetHostsResponse(
-                hosts=[host_pb2.Host(id="h1", name="host-name-exceeds-limit")]
+                hosts=host_pb2.HostSeq(
+                    nested=[host_pb2.Host(id="h1", name="host-name-exceeds-limit")]
+                )
             )
             return rpc.StatusCode.OK, "", resp.SerializeToString(), False
 
@@ -359,14 +364,14 @@ class RpcTransportTests(unittest.TestCase):
             "127.0.0.1:%d" % srv.port, options=[("grpc.max_receive_message_length", 5)]
         )
         try:
-            send_stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](send_limited)
+            send_stub = _HostStub(send_limited)
             req = host_pb2.HostGetHostsRequest()
             req.r.hosts.append("longer-than-five-bytes")
             with self.assertRaises(rpc.RpcError) as send_ctx:
                 send_stub.GetHosts(req, timeout=5)
             self.assertEqual(rpc.StatusCode.RESOURCE_EXHAUSTED, send_ctx.exception.code())
 
-            recv_stub = opencue.cuebot.Cuebot.SERVICE_MAP["host"](recv_limited)
+            recv_stub = _HostStub(recv_limited)
             with self.assertRaises(rpc.RpcError) as recv_ctx:
                 recv_stub.GetHosts(host_pb2.HostGetHostsRequest(), timeout=5)
             self.assertEqual(rpc.StatusCode.RESOURCE_EXHAUSTED, recv_ctx.exception.code())
@@ -389,7 +394,7 @@ class RpcTransportTests(unittest.TestCase):
         srv = _MiniHttp2GrpcServer(handler)
         channel = rpc.insecure_channel("127.0.0.1:%d" % srv.port)
         try:
-            stub = opencue.cuebot.Cuebot.SERVICE_MAP["cue"](channel)
+            stub = _CueStub(channel)
             first = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             time.sleep(0.05)
             second = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)

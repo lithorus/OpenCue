@@ -192,7 +192,7 @@ class GrpcServer(object):
 
     def __init__(self, rqCore):
         self.rqCore = rqCore
-        self.server = rqd.rqrpc.server(
+        self.server = rpc.server(
             futures.ThreadPoolExecutor(max_workers=rqd.rqconstants.RQD_GRPC_MAX_WORKERS))
         self.servicers = ['RqdInterfaceServicer']
         listenAddress = "[::]"
@@ -216,9 +216,9 @@ class GrpcServer(object):
             try:
                 self.rqCore.grpcConnected()
                 break
-            except rqd.rqrpc.RpcError as exc:
+            except rpc.RpcError as exc:
                 # pylint: disable=no-member
-                if exc.code() == rqd.rqrpc.StatusCode.UNAVAILABLE:
+                if exc.code() == rpc.StatusCode.UNAVAILABLE:
                     log.warning(
                         'GRPC connection failed. Retrying in %s seconds',
                         rqd.rqconstants.RQD_GRPC_CONNECTION_ATTEMPT_SLEEP_SEC)
@@ -290,7 +290,7 @@ class Network(object):
                     sleeping_policy=ExponentialBackoff(init_backoff_ms=100,
                                                        max_backoff_ms=1600,
                                                        multiplier=2),
-                    status_for_retry=(rqd.rqrpc.StatusCode.UNAVAILABLE,),
+                    status_for_retry=(rpc.StatusCode.UNAVAILABLE,),
                 ),
             )
 
@@ -298,9 +298,9 @@ class Network(object):
             if len(cuebots) == 0:
                 raise rqd.rqexceptions.RqdException("CUEBOT_HOSTNAME is empty")
             shuffle(cuebots)
-            self.channel = rqd.rqrpc.insecure_channel('%s:%s' % (cuebots[0],
+            self.channel = rpc.insecure_channel('%s:%s' % (cuebots[0],
                                                                  rqd.rqconstants.CUEBOT_GRPC_PORT))
-            self.channel = rqd.rqrpc.intercept_channel(self.channel, *interceptors)
+            self.channel = rpc.intercept_channel(self.channel, *interceptors)
             atexit.register(self.closeChannel)
 
     def __getReportStub(self):
@@ -390,7 +390,7 @@ class RetryOnRpcErrorClientInterceptor(rpc.UnaryUnaryClientInterceptor):
             try:
                 return continuation(client_call_details,
                                     request_or_iterator)
-            except rqd.rqrpc.RpcError as response:
+            except rpc.RpcError as response:
                 # Raise if it was last attempt
                 if attempt == (self._max_attempts - 1):
                     raise

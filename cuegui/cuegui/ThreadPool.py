@@ -57,7 +57,7 @@ import os
 import threading
 
 from qtpy import QtCore
-import opencue_proto.rpc
+from opencue_proto import rpc
 
 import cuegui.Logger
 
@@ -238,11 +238,11 @@ class ThreadPool(QtCore.QObject):
                     else:
                         result = work[0]()
                     succeeded = True
-                except opencue_proto.rpc.RpcError as e:
+                except rpc.RpcError as e:
                     # Handle gRPC errors gracefully - these are often transient
                     # pylint: disable=no-member
-                    if hasattr(e, 'code') and e.code() in [opencue_proto.rpc.StatusCode.CANCELLED,
-                                                             opencue_proto.rpc.StatusCode.UNAVAILABLE]:
+                    if hasattr(e, 'code') and e.code() in [rpc.StatusCode.CANCELLED,
+                                                             rpc.StatusCode.UNAVAILABLE]:
                         logger.warning("gRPC connection issue for '%s': %s - "
                                      "UI will retry on next update", work[2], e.details())
                     else:

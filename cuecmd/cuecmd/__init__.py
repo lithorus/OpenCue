@@ -15,19 +15,10 @@
 
 """OpenCue Cuecmd command execution tool."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 try:
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        __version__ = version("opencue_cuecmd")
-    except PackageNotFoundError:
-        # Package is not installed
-        __version__ = "1.0.0"
-except ImportError:
-    # Python < 3.8
-    try:
-        import pkg_resources
-
-        __version__ = pkg_resources.get_distribution("opencue_cuecmd").version
-    except Exception:
-        __version__ = "1.0.0"
+    __version__ = version("opencue_cuecmd")
+except PackageNotFoundError:
+    # Package is not installed
+    __version__ = "1.0.0"
