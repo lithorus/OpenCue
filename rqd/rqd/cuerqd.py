@@ -28,12 +28,12 @@ import os
 import random
 
 import opencue_proto.rqd_pb2
-import rqd.rqconstants
-import rqd.rqrpc
+import opencue_proto.rpc as rqrpc
+from rqd import rqconstants
 
 
-RqdInterfaceStub = rqd.rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RqdInterface')
-RunningFrameStub = rqd.rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RunningFrame')
+RqdInterfaceStub = rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RqdInterface')
+RunningFrameStub = rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RunningFrame')
 
 
 class RqdHost(object):
@@ -41,11 +41,11 @@ class RqdHost(object):
 
     This class supplies a wrapper for querying or sending commands to an RQD host."""
 
-    def __init__(self, rqdHost, rqdPort=rqd.rqconstants.RQD_GRPC_PORT):
+    def __init__(self, rqdHost, rqdPort=rqconstants.RQD_GRPC_PORT):
         self.rqdHost = rqdHost
         self.rqdPort = rqdPort
 
-        channel = rqd.rqrpc.insecure_channel('%s:%s' % (self.rqdHost, self.rqdPort))
+        channel = rqrpc.insecure_channel('%s:%s' % (self.rqdHost, self.rqdPort))
         self.stub = RqdInterfaceStub(channel)
         self.frameStub = RunningFrameStub(channel)
 
@@ -60,13 +60,13 @@ class RqdHost(object):
 
     def nimbyOff(self):
         """Disables Nimby on the host."""
-        log.info(self.rqdHost, "Turning off Nimby")
+        log.info("%s: Turning off Nimby", self.rqdHost)
         log.info("rqd nimbyoff by %s", os.environ.get("USER"))
         self.stub.NimbyOff(opencue_proto.rqd_pb2.RqdStaticNimbyOffRequest())
 
     def nimbyOn(self):
         """Enables Nimby on the host."""
-        log.info(self.rqdHost, "Turning on Nimby")
+        log.info("%s: Turning on Nimby", self.rqdHost)
         log.info("rqd nimbyon by %s", os.environ.get("USER"))
         self.stub.NimbyOn(opencue_proto.rqd_pb2.RqdStaticNimbyOnRequest())
 

@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import absolute_import
 
 import opencue
-from . import rpc
+from opencue_proto import rpc
 
 
 class CueException(Exception):

@@ -24,7 +24,7 @@ from __future__ import division
 import logging
 
 import opencue_proto.rqd_pb2
-import rqd.rqrpc
+import opencue_proto.rpc as rqrpc
 
 
 log = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class RqdInterfaceServicer(object):
                 running_frame_info=frame.runningFrameInfo())
         context.set_details(
             "The requested frame was not found. frameId: {}".format(request.frameId))
-        context.set_code(rqd.rqrpc.StatusCode.NOT_FOUND)
+        context.set_code(rqrpc.StatusCode.NOT_FOUND)
         return opencue_proto.rqd_pb2.RqdStaticGetRunningFrameStatusResponse()
 
     def KillRunningFrame(self, request, context):
@@ -70,7 +70,7 @@ class RqdInterfaceServicer(object):
             context.set_details(
                 "The requested frame to kill was not found. frameId: {}".format(
                     request.frame_id))
-            context.set_code(rqd.rqrpc.StatusCode.NOT_FOUND)
+            context.set_code(rqrpc.StatusCode.NOT_FOUND)
             log.warning("Wasn't able to find frame(%s) to kill", request.frame_id)
         return opencue_proto.rqd_pb2.RqdStaticKillRunningFrameResponse()
 
@@ -92,7 +92,7 @@ class RqdInterfaceServicer(object):
            fails loudly instead of pretending success so callers see nothing was restarted.
            Use the Rust RQD for service restart with frame recovery."""
         log.warning("Request received: restartRqdNow. Not supported by Python RQD.")
-        context.set_code(rqd.rqrpc.StatusCode.UNIMPLEMENTED)
+        context.set_code(rqrpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Restarting the RQD service is not supported by Python RQD; "
                             "deploy the Rust RQD for this feature.")
         return opencue_proto.rqd_pb2.RqdStaticRestartNowResponse()
@@ -102,7 +102,7 @@ class RqdInterfaceServicer(object):
            Python RQD; fails loudly instead of pretending success so callers see nothing
            was scheduled. Use the Rust RQD for service restart with frame recovery."""
         log.warning("Request received: restartRqdIdle. Not supported by Python RQD.")
-        context.set_code(rqd.rqrpc.StatusCode.UNIMPLEMENTED)
+        context.set_code(rqrpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Restarting the RQD service is not supported by Python RQD; "
                             "deploy the Rust RQD for this feature.")
         return opencue_proto.rqd_pb2.RqdStaticRestartIdleResponse()

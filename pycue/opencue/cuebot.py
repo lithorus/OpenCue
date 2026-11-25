@@ -45,7 +45,7 @@ from opencue_proto import monitoring_pb2
 from opencue.exception import ConnectionException
 from opencue.exception import CueException
 import opencue.config
-from opencue import rpc
+from opencue_proto import rpc
 
 
 __all__ = ["Cuebot"]

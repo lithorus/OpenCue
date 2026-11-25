@@ -32,19 +32,20 @@ import platform
 import subprocess
 import time
 
-import opencue_proto.report_pb2
-import opencue_proto.rqd_pb2
+from opencue_proto import report_pb2
+from opencue_proto import rqd_pb2
+from opencue_proto import rpc
+
 import rqd.rqconstants
 import rqd.rqexceptions
 import rqd.rqdservicers
-import rqd.rqrpc
 import rqd.rqutil
 
 
 log = logging.getLogger(__name__)
 
-RqdReportInterfaceStub = rqd.rqrpc.stub_factory(
-    opencue_proto.report_pb2, 'RqdReportInterface')
+RqdReportInterfaceStub = rpc.stub_factory(
+    report_pb2, 'RqdReportInterface')
 
 
 class RunningFrame(object):
@@ -84,7 +85,7 @@ class RunningFrame(object):
 
     def runningFrameInfo(self):
         """Returns the RunningFrameInfo object"""
-        runningFrameInfo = opencue_proto.report_pb2.RunningFrameInfo(
+        runningFrameInfo = report_pb2.RunningFrameInfo(
             resource_id=self.runFrame.resource_id,
             job_id=self.runFrame.job_id,
             job_name=self.runFrame.job_name,
@@ -118,11 +119,11 @@ class RunningFrame(object):
         :return: serialized children proc host stats
         :rtype: opencue_proto.report_pb2.ChildrenProcStats
         """
-        childrenProc = opencue_proto.report_pb2.ChildrenProcStats()
+        childrenProc = report_pb2.ChildrenProcStats()
         for proc, values in self.childrenProcs.items():
-            procStats = opencue_proto.report_pb2.ProcStats()
-            procStatFile = opencue_proto.report_pb2.Stat()
-            procStatmFile = opencue_proto.report_pb2.Statm()
+            procStats = report_pb2.ProcStats()
+            procStatFile = report_pb2.Stat()
+            procStatmFile = report_pb2.Statm()
 
             procStatFile.pid = proc
             procStatFile.name = values["name"] if values["name"] else ""
@@ -207,7 +208,7 @@ class GrpcServer(object):
                 servicer[:-len('Servicer')] if servicer.endswith('Servicer') else servicer
             )
             servicerClass = getattr(rqd.rqdservicers, servicer)
-            self.server.add_service(opencue_proto.rqd_pb2, service_name, servicerClass(self.rqCore))
+            self.server.add_service(rqd_pb2, service_name, servicerClass(self.rqCore))
 
     def connectGrpcWithRetries(self):
         """Connects to the Cuebot gRPC, with built-in retries."""
@@ -309,20 +310,20 @@ class Network(object):
     def reportRqdStartup(self, report):
         """Wraps the ability to send a startup report to rqd via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportRqdStartupRequest(boot_report=report)
+        request = report_pb2.RqdReportRqdStartupRequest(boot_report=report)
         stub.ReportRqdStartup(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
     def reportStatus(self, report):
         """Wraps the ability to send a status report to the cuebot via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportStatusRequest(host_report=report)
+        request = report_pb2.RqdReportStatusRequest(host_report=report)
         stub.ReportStatus(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
     def reportRunningFrameCompletion(self, report):
         """Wraps the ability to send a running frame completion report
            to the cuebot via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportRunningFrameCompletionRequest(
+        request = report_pb2.RqdReportRunningFrameCompletionRequest(
             frame_complete_report=report)
         stub.ReportRunningFrameCompletion(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
@@ -367,7 +368,7 @@ class ExponentialBackoff(SleepingPolicy):
         time.sleep(sleep_time_ms / 1000.0)
 
 
-class RetryOnRpcErrorClientInterceptor(rqd.rqrpc.UnaryUnaryClientInterceptor):
+class RetryOnRpcErrorClientInterceptor(rpc.UnaryUnaryClientInterceptor):
     """
     Implement Client/Stream interceptors for GRPC channels to retry
     calls that failed with retry-able states. This is required for

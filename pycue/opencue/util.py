@@ -26,7 +26,7 @@ import os
 import time
 
 import opencue
-from . import rpc
+from opencue_proto import rpc
 
 logger = logging.getLogger('opencue')
 

@@ -23,7 +23,7 @@ rest_gateway/*.tar\.gz
 cuebot/.settings/*
 cuebot/.classpath
 cuebot/.project
-/proto/opencue_proto/
+/proto/opencue_proto/*_pb2.py
 /pycue/opencue/compiled_proto/
 /rqd/rqd/compiled_proto/
 docker-compose-local.yml
