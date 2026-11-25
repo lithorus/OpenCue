@@ -38,7 +38,7 @@ RQD_HOSTNAME = 'arbitrary-rqd-hostname'
 
 @mock.patch('rqd.cuerqd.RunningFrameStub')
 @mock.patch('rqd.cuerqd.RqdInterfaceStub')
-@mock.patch('rqd.rqrpc.insecure_channel', new=mock.MagicMock())
+@mock.patch('opencue_proto.rpc.insecure_channel', new=mock.MagicMock())
 class CueRqdTests(unittest.TestCase):
 
     @mock.patch('rqd.cuerqd.RqdHost')

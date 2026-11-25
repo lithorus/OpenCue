@@ -26,7 +26,7 @@ from rqd.rqlogging import LokiLogger
 @pytest.fixture
 @mock.patch('rqd.cuerqd.RunningFrameStub')
 @mock.patch('rqd.cuerqd.RqdInterfaceStub')
-@mock.patch('rqd.rqrpc.insecure_channel', new=mock.MagicMock())
+@mock.patch('opencue_proto.rpc.insecure_channel', new=mock.MagicMock())
 def runFrame(stubMock, frameStubMock):
     rf = opencue_proto.rqd_pb2.RunFrame()
     rf.job_id = "SD6F3S72DJ26236KFS"
