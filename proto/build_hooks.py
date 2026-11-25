@@ -51,7 +51,6 @@ class CustomBuildHook(BuildHookInterface):
             "grpc_tools.protoc",
             f"-I={proto_dir}",
             f"--python_out={output_dir}",
-            f"--grpc_python_out={output_dir}",
         ] + [os.path.join(proto_dir, f) for f in proto_files]
 
         print(f"Compiling protocol buffers: {' '.join(command)}")
