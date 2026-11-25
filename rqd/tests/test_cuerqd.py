@@ -36,9 +36,9 @@ SCRIPT_NAME = '/arbitrary/path/to/script'
 RQD_HOSTNAME = 'arbitrary-rqd-hostname'
 
 
-@mock.patch('opencue_proto.rqd_pb2_grpc.RunningFrameStub')
-@mock.patch('opencue_proto.rqd_pb2_grpc.RqdInterfaceStub')
-@mock.patch('grpc.insecure_channel', new=mock.MagicMock())
+@mock.patch('rqd.cuerqd.RunningFrameStub')
+@mock.patch('rqd.cuerqd.RqdInterfaceStub')
+@mock.patch('rqd.rqrpc.insecure_channel', new=mock.MagicMock())
 class CueRqdTests(unittest.TestCase):
 
     @mock.patch('rqd.cuerqd.RqdHost')

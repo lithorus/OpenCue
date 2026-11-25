@@ -16,10 +16,9 @@
 """Node graph to display Layers of a Job"""
 
 
-import grpc
-
 from qtpy import QtWidgets
 
+import opencue.rpc
 from opencue.exception import EntityNotFoundException
 
 import cuegui
@@ -126,15 +125,15 @@ class JobMonitorGraph(AbstractGraphWidget):
             cuegui.app().job_not_found.emit(self.job)
             self.setJob(None)
             return
-        except grpc.RpcError as e:
+        except opencue.rpc.RpcError as e:
             # pylint: disable=no-member
             if hasattr(e, 'code'):
-                if e.code() == grpc.StatusCode.NOT_FOUND:
+                if e.code() == opencue.rpc.StatusCode.NOT_FOUND:
                     logger.info("Job not found, notifying and clearing job from view")
                     cuegui.app().job_not_found.emit(self.job)
                     self.setJob(None)
                     return
-                if e.code() in [grpc.StatusCode.CANCELLED, grpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning(
                         "gRPC connection interrupted during graph creation, will retry")
                 else:
@@ -161,7 +160,7 @@ class JobMonitorGraph(AbstractGraphWidget):
         for node in self.graph.all_nodes():
             try:
                 depends = node.rpcObject.getWhatDependsOnThis()
-            except (EntityNotFoundException, grpc.RpcError) as e:
+            except (EntityNotFoundException, opencue.rpc.RpcError) as e:
                 logger.warning("Failed to get dependencies for node %s: %s", node.name(), e)
                 continue
             for depend in depends:
@@ -189,15 +188,15 @@ class JobMonitorGraph(AbstractGraphWidget):
                 cuegui.app().job_not_found.emit(self.job)
                 self.setJob(None)
                 return
-            except grpc.RpcError as e:
+            except opencue.rpc.RpcError as e:
                 # pylint: disable=no-member
                 if hasattr(e, 'code'):
-                    if e.code() == grpc.StatusCode.NOT_FOUND:
+                    if e.code() == opencue.rpc.StatusCode.NOT_FOUND:
                         logger.info("Job not found during update, notifying and clearing job")
                         cuegui.app().job_not_found.emit(self.job)
                         self.setJob(None)
                         return
-                    if e.code() in [grpc.StatusCode.CANCELLED, grpc.StatusCode.UNAVAILABLE]:
+                    if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
                         logger.warning(
                             "gRPC connection interrupted during graph update, will retry")
                     else:

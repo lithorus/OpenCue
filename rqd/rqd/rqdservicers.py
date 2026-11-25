@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 
-"""Implements the server side of the RQD gRPC service."""
+"""Implements the server side of the RQD RPC service."""
 
 
 from __future__ import absolute_import
@@ -22,17 +22,15 @@ from __future__ import division
 
 import logging
 
-import grpc
-
 import opencue_proto.rqd_pb2
-import opencue_proto.rqd_pb2_grpc
+import rqd.rqrpc
 
 
 log = logging.getLogger(__name__)
 
 
-class RqdInterfaceServicer(opencue_proto.rqd_pb2_grpc.RqdInterfaceServicer):
-    """Service interface for RqdStatic gRPC definition."""
+class RqdInterfaceServicer(object):
+    """Service interface for RqdStatic RPC definition."""
 
     def __init__(self, rqCore):
         self.rqCore = rqCore
@@ -58,7 +56,7 @@ class RqdInterfaceServicer(opencue_proto.rqd_pb2_grpc.RqdInterfaceServicer):
                 running_frame_info=frame.runningFrameInfo())
         context.set_details(
             "The requested frame was not found. frameId: {}".format(request.frameId))
-        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_code(rqd.rqrpc.StatusCode.NOT_FOUND)
         return opencue_proto.rqd_pb2.RqdStaticGetRunningFrameStatusResponse()
 
     def KillRunningFrame(self, request, context):
@@ -71,7 +69,7 @@ class RqdInterfaceServicer(opencue_proto.rqd_pb2_grpc.RqdInterfaceServicer):
             context.set_details(
                 "The requested frame to kill was not found. frameId: {}".format(
                     request.frame_id))
-            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_code(rqd.rqrpc.StatusCode.NOT_FOUND)
             log.warning("Wasn't able to find frame(%s) to kill", request.frame_id)
         return opencue_proto.rqd_pb2.RqdStaticKillRunningFrameResponse()
 
@@ -93,7 +91,7 @@ class RqdInterfaceServicer(opencue_proto.rqd_pb2_grpc.RqdInterfaceServicer):
            fails loudly instead of pretending success so callers see nothing was restarted.
            Use the Rust RQD for service restart with frame recovery."""
         log.warning("Request received: restartRqdNow. Not supported by Python RQD.")
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_code(rqd.rqrpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Restarting the RQD service is not supported by Python RQD; "
                             "deploy the Rust RQD for this feature.")
         return opencue_proto.rqd_pb2.RqdStaticRestartNowResponse()
@@ -103,7 +101,7 @@ class RqdInterfaceServicer(opencue_proto.rqd_pb2_grpc.RqdInterfaceServicer):
            Python RQD; fails loudly instead of pretending success so callers see nothing
            was scheduled. Use the Rust RQD for service restart with frame recovery."""
         log.warning("Request received: restartRqdIdle. Not supported by Python RQD.")
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_code(rqd.rqrpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Restarting the RQD service is not supported by Python RQD; "
                             "deploy the Rust RQD for this feature.")
         return opencue_proto.rqd_pb2.RqdStaticRestartIdleResponse()

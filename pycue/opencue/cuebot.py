@@ -25,44 +25,27 @@ import time
 import atexit
 import logging
 import os
-import platform
-
-import grpc
 
 from opencue_proto import comment_pb2
-from opencue_proto import comment_pb2_grpc
 from opencue_proto import criterion_pb2
 from opencue_proto import cue_pb2
-from opencue_proto import cue_pb2_grpc
 from opencue_proto import department_pb2
-from opencue_proto import department_pb2_grpc
 from opencue_proto import depend_pb2
-from opencue_proto import depend_pb2_grpc
 from opencue_proto import facility_pb2
-from opencue_proto import facility_pb2_grpc
 from opencue_proto import filter_pb2
-from opencue_proto import filter_pb2_grpc
 from opencue_proto import host_pb2
-from opencue_proto import host_pb2_grpc
 from opencue_proto import job_pb2
-from opencue_proto import job_pb2_grpc
 from opencue_proto import limit_pb2
-from opencue_proto import limit_pb2_grpc
 from opencue_proto import renderPartition_pb2
-from opencue_proto import renderPartition_pb2_grpc
 from opencue_proto import service_pb2
-from opencue_proto import service_pb2_grpc
 from opencue_proto import show_pb2
-from opencue_proto import show_pb2_grpc
 from opencue_proto import subscription_pb2
-from opencue_proto import subscription_pb2_grpc
 from opencue_proto import task_pb2
-from opencue_proto import task_pb2_grpc
 from opencue_proto import monitoring_pb2
-from opencue_proto import monitoring_pb2_grpc
 from opencue.exception import ConnectionException
 from opencue.exception import CueException
 import opencue.config
+from opencue import rpc
 
 
 __all__ = ["Cuebot"]
@@ -73,9 +56,6 @@ logger = logging.getLogger("opencue")
 DEFAULT_MAX_MESSAGE_BYTES = 1024 ** 2 * 10
 DEFAULT_GRPC_PORT = 8443
 
-if platform.system() != 'Darwin':
-    # Avoid spamming users with epoll fork warning messages
-    os.environ["GRPC_POLL_STRATEGY"] = "epoll1"
 
 class Cuebot(object):
     """Used to manage the connection to the Cuebot.  Normally the connection
@@ -120,30 +100,30 @@ class Cuebot(object):
     }
 
     SERVICE_MAP = {
-        'action': filter_pb2_grpc.ActionInterfaceStub,
-        'allocation': facility_pb2_grpc.AllocationInterfaceStub,
-        'comment': comment_pb2_grpc.CommentInterfaceStub,
-        'cue': cue_pb2_grpc.CueInterfaceStub,
-        'depend': depend_pb2_grpc.DependInterfaceStub,
-        'department': department_pb2_grpc.DepartmentInterfaceStub,
-        'facility': facility_pb2_grpc.FacilityInterfaceStub,
-        'filter': filter_pb2_grpc.FilterInterfaceStub,
-        'frame': job_pb2_grpc.FrameInterfaceStub,
-        'group': job_pb2_grpc.GroupInterfaceStub,
-        'host': host_pb2_grpc.HostInterfaceStub,
-        'job': job_pb2_grpc.JobInterfaceStub,
-        'layer': job_pb2_grpc.LayerInterfaceStub,
-        'limit': limit_pb2_grpc.LimitInterfaceStub,
-        'matcher': filter_pb2_grpc.MatcherInterfaceStub,
-        'monitoring': monitoring_pb2_grpc.MonitoringInterfaceStub,
-        'owner': host_pb2_grpc.OwnerInterfaceStub,
-        'proc': host_pb2_grpc.ProcInterfaceStub,
-        'renderPartition': renderPartition_pb2_grpc.RenderPartitionInterfaceStub,
-        'service': service_pb2_grpc.ServiceInterfaceStub,
-        'serviceOverride': service_pb2_grpc.ServiceOverrideInterfaceStub,
-        'show': show_pb2_grpc.ShowInterfaceStub,
-        'subscription': subscription_pb2_grpc.SubscriptionInterfaceStub,
-        'task': task_pb2_grpc.TaskInterfaceStub
+        'action': rpc.stub_factory(filter_pb2, 'ActionInterface'),
+        'allocation': rpc.stub_factory(facility_pb2, 'AllocationInterface'),
+        'comment': rpc.stub_factory(comment_pb2, 'CommentInterface'),
+        'cue': rpc.stub_factory(cue_pb2, 'CueInterface'),
+        'depend': rpc.stub_factory(depend_pb2, 'DependInterface'),
+        'department': rpc.stub_factory(department_pb2, 'DepartmentInterface'),
+        'facility': rpc.stub_factory(facility_pb2, 'FacilityInterface'),
+        'filter': rpc.stub_factory(filter_pb2, 'FilterInterface'),
+        'frame': rpc.stub_factory(job_pb2, 'FrameInterface'),
+        'group': rpc.stub_factory(job_pb2, 'GroupInterface'),
+        'host': rpc.stub_factory(host_pb2, 'HostInterface'),
+        'job': rpc.stub_factory(job_pb2, 'JobInterface'),
+        'layer': rpc.stub_factory(job_pb2, 'LayerInterface'),
+        'limit': rpc.stub_factory(limit_pb2, 'LimitInterface'),
+        'matcher': rpc.stub_factory(filter_pb2, 'MatcherInterface'),
+        'monitoring': rpc.stub_factory(monitoring_pb2, 'MonitoringInterface'),
+        'owner': rpc.stub_factory(host_pb2, 'OwnerInterface'),
+        'proc': rpc.stub_factory(host_pb2, 'ProcInterface'),
+        'renderPartition': rpc.stub_factory(renderPartition_pb2, 'RenderPartitionInterface'),
+        'service': rpc.stub_factory(service_pb2, 'ServiceInterface'),
+        'serviceOverride': rpc.stub_factory(service_pb2, 'ServiceOverrideInterface'),
+        'show': rpc.stub_factory(show_pb2, 'ShowInterface'),
+        'subscription': rpc.stub_factory(subscription_pb2, 'SubscriptionInterface'),
+        'task': rpc.stub_factory(task_pb2, 'TaskInterface')
     }
 
     @staticmethod
@@ -170,8 +150,8 @@ class Cuebot(object):
 
     @staticmethod
     def setChannel():
-        """Sets the gRPC channel connection"""
-        # gRPC must specify a single host. Randomize host list to balance load across cuebots.
+        """Sets the RPC HTTP/2 channel connection"""
+        # Must specify a single host. Randomize host list to balance load across cuebots.
         hosts = list(Cuebot.Hosts)
         shuffle(hosts)
         maxMessageBytes = Cuebot.Config.get('cuebot.max_message_bytes', DEFAULT_MAX_MESSAGE_BYTES)
@@ -183,7 +163,7 @@ class Cuebot(object):
                 sleeping_policy=ExponentialBackoff(init_backoff_ms=100,
                                                    max_backoff_ms=1600,
                                                    multiplier=2),
-                status_for_retry=(grpc.StatusCode.UNAVAILABLE,),
+                status_for_retry=(rpc.StatusCode.UNAVAILABLE,),
             ),
         )
 
@@ -195,12 +175,11 @@ class Cuebot(object):
                 connectStr = '%s:%s' % (
                     host, Cuebot.Config.get('cuebot.grpc_port', DEFAULT_GRPC_PORT))
             # pylint: disable=logging-not-lazy
-            logger.debug('connecting to gRPC at %s' % connectStr)
+            logger.debug('connecting to RPC at %s' % connectStr)
             # pylint: enable=logging-not-lazy
-            # TODO(bcipriano) Configure gRPC TLS. (Issue #150)
             try:
-                Cuebot.RpcChannel = grpc.intercept_channel(
-                    grpc.insecure_channel(connectStr, options=[
+                Cuebot.RpcChannel = rpc.intercept_channel(
+                    rpc.insecure_channel(connectStr, options=[
                         ('grpc.max_send_message_length', maxMessageBytes),
                         ('grpc.max_receive_message_length', maxMessageBytes)]),
                     *interceptors)
@@ -209,16 +188,16 @@ class Cuebot(object):
                     cue_pb2.CueGetSystemStatsRequest(), timeout=Cuebot.Timeout)
             # pylint: disable=broad-except
             except Exception:
-                logger.warning('Could not establish grpc channel with %s', connectStr)
+                logger.warning('Could not establish RPC channel with %s', connectStr)
                 continue
             atexit.register(Cuebot.closeChannel)
             return None
-        raise ConnectionException('No grpc connection could be established. ' +
+        raise ConnectionException('No RPC connection could be established. ' +
                                   'Please check configured cuebot hosts: ' + connectStr)
 
     @staticmethod
     def closeChannel():
-        """Close the gRPC channel, delete it and reset it to None."""
+        """Close the RPC channel, delete it and reset it to None."""
         if Cuebot and Cuebot.RpcChannel is not None:
             Cuebot.RpcChannel.close()
             del Cuebot.RpcChannel
@@ -226,7 +205,7 @@ class Cuebot(object):
 
     @staticmethod
     def resetChannel():
-        """Close and reopen the gRPC channel."""
+        """Close and reopen the RPC channel."""
         Cuebot.closeChannel()
         Cuebot.setChannel()
 
@@ -343,15 +322,10 @@ class ExponentialBackoff(SleepingPolicy):
         time.sleep(sleep_time_ms / 1000.0)
 
 
-class RetryOnRpcErrorClientInterceptor(
-    grpc.UnaryUnaryClientInterceptor,
-    grpc.StreamUnaryClientInterceptor
-):
+class RetryOnRpcErrorClientInterceptor(rpc.UnaryUnaryClientInterceptor):
     """
-    Implement Client/Stream interceptors for GRPC channels to retry
-    calls that failed with retry-able states. This is required for
-    handling server interruptions that are not automatically handled
-    by grpc.insecure_channel
+    Implement Client interceptors for HTTP/2 channels to retry
+    calls that failed with retry-able states.
     """
     def __init__(self,
                  max_attempts,
@@ -361,17 +335,16 @@ class RetryOnRpcErrorClientInterceptor(
         self._sleeping_policy = sleeping_policy
         self._retry_statuses = status_for_retry
 
-    # pylint: disable=inconsistent-return-statements
     def _intercept_call(self, continuation, client_call_details,
                         request_or_iterator):
         for attempt in range(self._max_attempts):
             try:
                 return continuation(client_call_details,
                                     request_or_iterator)
-            except grpc.RpcError as response:
-                # Return if it was last attempt
+            except rpc.RpcError as response:
+                # Raise if it was last attempt
                 if attempt == (self._max_attempts - 1):
-                    return response
+                    raise
 
                 # If status code is not in retryable status codes
                 # pylint: disable=no-member
@@ -379,7 +352,7 @@ class RetryOnRpcErrorClientInterceptor(
                         and hasattr(response, 'code') \
                         and response.code() \
                         not in self._retry_statuses:
-                    return response
+                    raise
 
                 self._sleeping_policy.sleep(attempt)
 
@@ -387,9 +360,3 @@ class RetryOnRpcErrorClientInterceptor(
                               request):
         return self._intercept_call(continuation, client_call_details,
                                     request)
-
-    def intercept_stream_unary(
-            self, continuation, client_call_details, request_iterator
-    ):
-        return self._intercept_call(continuation, client_call_details,
-                                    request_iterator)

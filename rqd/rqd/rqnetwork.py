@@ -32,24 +32,19 @@ import platform
 import subprocess
 import time
 
-# Disable GRPC fork support to avoid the warning:
-#  "fork_posix.cc Other threads are currently calling into gRPC, skipping fork() handlers"
-# Adding this environment variable doesn't change the server behaviour
-os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
-
-# pylint: disable=wrong-import-position
-import grpc
-
 import opencue_proto.report_pb2
-import opencue_proto.report_pb2_grpc
-import opencue_proto.rqd_pb2_grpc
+import opencue_proto.rqd_pb2
 import rqd.rqconstants
 import rqd.rqexceptions
 import rqd.rqdservicers
+import rqd.rqrpc
 import rqd.rqutil
 
 
 log = logging.getLogger(__name__)
+
+RqdReportInterfaceStub = rqd.rqrpc.stub_factory(
+    opencue_proto.report_pb2, 'RqdReportInterface')
 
 
 class RunningFrame(object):
@@ -196,7 +191,7 @@ class GrpcServer(object):
 
     def __init__(self, rqCore):
         self.rqCore = rqCore
-        self.server = grpc.server(
+        self.server = rqd.rqrpc.server(
             futures.ThreadPoolExecutor(max_workers=rqd.rqconstants.RQD_GRPC_MAX_WORKERS))
         self.servicers = ['RqdInterfaceServicer']
         listenAddress = "[::]"
@@ -208,9 +203,11 @@ class GrpcServer(object):
     def addServicers(self):
         """Registers the gRPC servicers defined in rqdservicers.py."""
         for servicer in self.servicers:
-            addFunc = getattr(opencue_proto.rqd_pb2_grpc, 'add_{0}_to_server'.format(servicer))
+            service_name = (
+                servicer[:-len('Servicer')] if servicer.endswith('Servicer') else servicer
+            )
             servicerClass = getattr(rqd.rqdservicers, servicer)
-            addFunc(servicerClass(self.rqCore), self.server)
+            self.server.add_service(opencue_proto.rqd_pb2, service_name, servicerClass(self.rqCore))
 
     def connectGrpcWithRetries(self):
         """Connects to the Cuebot gRPC, with built-in retries."""
@@ -218,9 +215,9 @@ class GrpcServer(object):
             try:
                 self.rqCore.grpcConnected()
                 break
-            except grpc.RpcError as exc:
+            except rqd.rqrpc.RpcError as exc:
                 # pylint: disable=no-member
-                if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                if exc.code() == rqd.rqrpc.StatusCode.UNAVAILABLE:
                     log.warning(
                         'GRPC connection failed. Retrying in %s seconds',
                         rqd.rqconstants.RQD_GRPC_CONNECTION_ATTEMPT_SLEEP_SEC)
@@ -292,7 +289,7 @@ class Network(object):
                     sleeping_policy=ExponentialBackoff(init_backoff_ms=100,
                                                        max_backoff_ms=1600,
                                                        multiplier=2),
-                    status_for_retry=(grpc.StatusCode.UNAVAILABLE,),
+                    status_for_retry=(rqd.rqrpc.StatusCode.UNAVAILABLE,),
                 ),
             )
 
@@ -300,14 +297,14 @@ class Network(object):
             if len(cuebots) == 0:
                 raise rqd.rqexceptions.RqdException("CUEBOT_HOSTNAME is empty")
             shuffle(cuebots)
-            self.channel = grpc.insecure_channel('%s:%s' % (cuebots[0],
-                                                            rqd.rqconstants.CUEBOT_GRPC_PORT))
-            self.channel = grpc.intercept_channel(self.channel, *interceptors)
+            self.channel = rqd.rqrpc.insecure_channel('%s:%s' % (cuebots[0],
+                                                                 rqd.rqconstants.CUEBOT_GRPC_PORT))
+            self.channel = rqd.rqrpc.intercept_channel(self.channel, *interceptors)
             atexit.register(self.closeChannel)
 
     def __getReportStub(self):
         self.__getChannel()
-        return opencue_proto.report_pb2_grpc.RqdReportInterfaceStub(self.channel)
+        return RqdReportInterfaceStub(self.channel)
 
     def reportRqdStartup(self, report):
         """Wraps the ability to send a startup report to rqd via grpc"""
@@ -370,15 +367,12 @@ class ExponentialBackoff(SleepingPolicy):
         time.sleep(sleep_time_ms / 1000.0)
 
 
-class RetryOnRpcErrorClientInterceptor(
-    grpc.UnaryUnaryClientInterceptor,
-    grpc.StreamUnaryClientInterceptor
-):
+class RetryOnRpcErrorClientInterceptor(rqd.rqrpc.UnaryUnaryClientInterceptor):
     """
     Implement Client/Stream interceptors for GRPC channels to retry
     calls that failed with retry-able states. This is required for
     handling server interruptions that are not automatically handled
-    by grpc.insecure_channel
+    by insecure_channel
     """
     def __init__(self,
                  max_attempts,
@@ -395,10 +389,10 @@ class RetryOnRpcErrorClientInterceptor(
             try:
                 return continuation(client_call_details,
                                     request_or_iterator)
-            except grpc.RpcError as response:
-                # Return if it was last attempt
+            except rqd.rqrpc.RpcError as response:
+                # Raise if it was last attempt
                 if attempt == (self._max_attempts - 1):
-                    return response
+                    raise
 
                 # If status code is not in retryable status codes
                 # pylint: disable=no-member
@@ -406,7 +400,7 @@ class RetryOnRpcErrorClientInterceptor(
                         and hasattr(response, 'code') \
                         and response.code() \
                         not in self._retry_statuses:
-                    return response
+                    raise
 
                 self._sleeping_policy.sleep(attempt)
 
@@ -414,9 +408,3 @@ class RetryOnRpcErrorClientInterceptor(
                               request):
         return self._intercept_call(continuation, client_call_details,
                                     request)
-
-    def intercept_stream_unary(
-            self, continuation, client_call_details, request_iterator
-    ):
-        return self._intercept_call(continuation, client_call_details,
-                                    request_iterator)

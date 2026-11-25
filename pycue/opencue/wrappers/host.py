@@ -18,13 +18,13 @@ import enum
 import os
 import time
 from builtins import input
-import grpc
 
 from opencue_proto import comment_pb2
 from opencue_proto import host_pb2
 from opencue import Cuebot
 from opencue import util
 from opencue import search
+from opencue import rpc
 import opencue.wrappers.comment
 # pylint: disable=cyclic-import
 import opencue.wrappers.deed
@@ -338,10 +338,10 @@ class Host(object):
                 if host.bootTime() < start_time:
                     try:
                         host.rebootWhenIdle()
-                    except grpc.RpcError as rpc_error:
+                    except rpc.RpcError as rpc_error:
                         # pylint: disable=no-member
-                        if rpc_error.code() in [grpc.StatusCode.UNAVAILABLE,
-                                                grpc.StatusCode.CANCELLED]:
+                        if rpc_error.code() in [rpc.StatusCode.UNAVAILABLE,
+                                                rpc.StatusCode.CANCELLED]:
                             # Wait and Retry
                             time.sleep(5)
                             host.rebootWhenIdle()
@@ -364,10 +364,10 @@ class Host(object):
                         break
                     print("Still waiting on %s.." % rebooting_hosts)
                     time.sleep(check_hosts_interval_seconds)
-                except grpc.RpcError as rpc_error:
+                except rpc.RpcError as rpc_error:
                     # Ignore rpc unavailable to survive short service outages on the server side
                     # pylint: disable=no-member
-                    if rpc_error.code() in [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED]:
+                    if rpc_error.code() in [rpc.StatusCode.UNAVAILABLE, rpc.StatusCode.CANCELLED]:
                         continue
                     # pylint: enable=no-member
 
@@ -384,10 +384,10 @@ class Host(object):
                     host_still_rebooting = rebooting_hosts
                     print("Still waiting on %s.." % rebooting_hosts)
                     time.sleep(check_hosts_interval_seconds)
-                except grpc.RpcError as rpc_error:
+                except rpc.RpcError as rpc_error:
                     # Ignore rpc unavailable to survive short service outages on the server side
                     # pylint: disable=no-member
-                    if rpc_error.code() in [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED]:
+                    if rpc_error.code() in [rpc.StatusCode.UNAVAILABLE, rpc.StatusCode.CANCELLED]:
                         continue
                     # pylint: enable=no-member
         print("Finished rebooting requested hosts")
@@ -428,10 +428,10 @@ class Host(object):
                     break
                 print("Still waiting on %s hosts: %s.." % (len(rebooting_hosts), rebooting_hosts))
                 time.sleep(check_hosts_interval_seconds)
-            except grpc.RpcError as rpc_error:
+            except rpc.RpcError as rpc_error:
                 # Ignore rpc unavailable to survive short service outages on the server side
                 # pylint: disable=no-member
-                if rpc_error.code() in [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED]:
+                if rpc_error.code() in [rpc.StatusCode.UNAVAILABLE, rpc.StatusCode.CANCELLED]:
                     continue
                 # pylint: enable=no-member
 

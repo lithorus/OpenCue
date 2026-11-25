@@ -27,11 +27,13 @@ import logging as log
 import os
 import random
 
-import grpc
-
 import opencue_proto.rqd_pb2
-import opencue_proto.rqd_pb2_grpc
 import rqd.rqconstants
+import rqd.rqrpc
+
+
+RqdInterfaceStub = rqd.rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RqdInterface')
+RunningFrameStub = rqd.rqrpc.stub_factory(opencue_proto.rqd_pb2, 'RunningFrame')
 
 
 class RqdHost(object):
@@ -43,9 +45,9 @@ class RqdHost(object):
         self.rqdHost = rqdHost
         self.rqdPort = rqdPort
 
-        channel = grpc.insecure_channel('%s:%s' % (self.rqdHost, self.rqdPort))
-        self.stub = opencue_proto.rqd_pb2_grpc.RqdInterfaceStub(channel)
-        self.frameStub = opencue_proto.rqd_pb2_grpc.RunningFrameStub(channel)
+        channel = rqd.rqrpc.insecure_channel('%s:%s' % (self.rqdHost, self.rqdPort))
+        self.stub = RqdInterfaceStub(channel)
+        self.frameStub = RunningFrameStub(channel)
 
     def status(self):
         """Fetches and returns the host status report."""

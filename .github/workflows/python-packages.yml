@@ -62,4 +62,4 @@ jobs:
               python -c "import ${module}"
             fi
           done
-          python -c "import opencue_proto.report_pb2_grpc"
+          python -c "import opencue_proto.report_pb2"

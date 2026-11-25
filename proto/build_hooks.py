@@ -22,7 +22,7 @@ class CustomBuildHook(BuildHookInterface):
     It performs the following main tasks:
     1. Locates all `.proto` files within the project's `proto/` subdirectory.
     2. Invokes the `grpc_tools.protoc` compiler to generate the corresponding
-       Python modules (`_pb2.py`) and gRPC service modules (`_pb2_grpc.py`).
+       Python modules (`_pb2.py`).
     3. Places the generated Python files into the `opencue_proto/`
        subdirectory, making them available for inclusion in the final package.
     4. Post-processes the generated Python files to modify imports between

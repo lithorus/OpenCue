@@ -18,9 +18,8 @@ from __future__ import print_function
 from __future__ import division
 from __future__ import absolute_import
 
-import grpc
-
 import opencue
+from . import rpc
 
 
 class CueException(Exception):
@@ -56,9 +55,9 @@ class CueInternalErrorException(CueException):
 
 
 class ConnectionException(CueException):
-    """Raised when unable to connect to grpc server."""
-    failMsg = 'Unable to contact grpc server. {details}'
-    retryMsg = 'Unable to contact grpc server, checking again...'
+    """Raised when unable to connect to rpc server."""
+    failMsg = 'Unable to contact rpc server. {details}'
+    retryMsg = 'Unable to contact rpc server, checking again...'
     retryable = True
 
 
@@ -76,10 +75,10 @@ def getRetryCount():
 
 
 EXCEPTION_MAP = {
-    grpc.StatusCode.NOT_FOUND: EntityNotFoundException,
-    grpc.StatusCode.ALREADY_EXISTS: EntityAlreadyExistsException,
-    grpc.StatusCode.DEADLINE_EXCEEDED: DeadlineExceededException,
-    grpc.StatusCode.INTERNAL: CueInternalErrorException,
-    grpc.StatusCode.UNAVAILABLE: ConnectionException,
-    grpc.StatusCode.CANCELLED: CancelledException
+    rpc.StatusCode.NOT_FOUND: EntityNotFoundException,
+    rpc.StatusCode.ALREADY_EXISTS: EntityAlreadyExistsException,
+    rpc.StatusCode.DEADLINE_EXCEEDED: DeadlineExceededException,
+    rpc.StatusCode.INTERNAL: CueInternalErrorException,
+    rpc.StatusCode.UNAVAILABLE: ConnectionException,
+    rpc.StatusCode.CANCELLED: CancelledException
 }

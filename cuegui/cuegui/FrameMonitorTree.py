@@ -33,9 +33,9 @@ import time
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
-import grpc
 
 import opencue
+import opencue.rpc
 from opencue_proto import job_pb2
 
 import cuegui
@@ -519,16 +519,16 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
                 self.__lastUpdateTime = int(time.time())
                 return self.__job.getFrames(**self.frameSearch.options)
             return []
-        except grpc.RpcError as e:
+        except opencue.rpc.RpcError as e:
             # Handle gRPC errors - log but don't crash, allow UI to retry
             # pylint: disable=no-member
             if hasattr(e, 'code'):
-                if e.code() == grpc.StatusCode.NOT_FOUND:
+                if e.code() == opencue.rpc.StatusCode.NOT_FOUND:
                     logger.info("Job not found, notifying and clearing job from view")
                     cuegui.app().job_not_found.emit(self.__job)
                     self.setJob(None)
                     return []
-                if e.code() in [grpc.StatusCode.CANCELLED, grpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning("gRPC connection interrupted during frame update, will retry")
                 else:
                     logger.error("gRPC error in _getUpdate: %s", e)
@@ -557,15 +557,15 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
             self.__jobState = updated_data.state
             updatedFrames = updated_data.updated_frames.updated_frames
 
-        except grpc.RpcError as e:
+        except opencue.rpc.RpcError as e:
             # Handle gRPC errors - allow UI to continue and retry
             # pylint: disable=no-member
             if hasattr(e, 'code'):
-                if e.code() in [grpc.StatusCode.CANCELLED, grpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning("gRPC connection interrupted during frame update, will retry")
                     # Return None to trigger a full update on next cycle
                     return None
-                if e.code() == grpc.StatusCode.NOT_FOUND:
+                if e.code() == opencue.rpc.StatusCode.NOT_FOUND:
                     # Job was deleted
                     logger.info("Job not found, notifying and clearing job from view")
                     cuegui.app().job_not_found.emit(self.__job)
