@@ -528,7 +528,8 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
                     cuegui.app().job_not_found.emit(self.__job)
                     self.setJob(None)
                     return []
-                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED,
+                                opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning("gRPC connection interrupted during frame update, will retry")
                 else:
                     logger.error("gRPC error in _getUpdate: %s", e)
@@ -561,7 +562,8 @@ class FrameMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
             # Handle gRPC errors - allow UI to continue and retry
             # pylint: disable=no-member
             if hasattr(e, 'code'):
-                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED,
+                                opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning("gRPC connection interrupted during frame update, will retry")
                     # Return None to trigger a full update on next cycle
                     return None

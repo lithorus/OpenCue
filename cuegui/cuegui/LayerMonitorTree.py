@@ -304,7 +304,8 @@ class LayerMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
                         cuegui.app().job_not_found.emit(self.__job)
                         self.setJob(None)
                         return []
-                    if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
+                    if e.code() in [opencue.rpc.StatusCode.CANCELLED,
+                                    opencue.rpc.StatusCode.UNAVAILABLE]:
                         logger.warning(
                             "gRPC connection interrupted during layer update, will retry")
                     else:

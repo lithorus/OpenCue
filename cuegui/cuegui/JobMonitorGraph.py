@@ -133,7 +133,8 @@ class JobMonitorGraph(AbstractGraphWidget):
                     cuegui.app().job_not_found.emit(self.job)
                     self.setJob(None)
                     return
-                if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
+                if e.code() in [opencue.rpc.StatusCode.CANCELLED,
+                                opencue.rpc.StatusCode.UNAVAILABLE]:
                     logger.warning(
                         "gRPC connection interrupted during graph creation, will retry")
                 else:
@@ -196,7 +197,8 @@ class JobMonitorGraph(AbstractGraphWidget):
                         cuegui.app().job_not_found.emit(self.job)
                         self.setJob(None)
                         return
-                    if e.code() in [opencue.rpc.StatusCode.CANCELLED, opencue.rpc.StatusCode.UNAVAILABLE]:
+                    if e.code() in [opencue.rpc.StatusCode.CANCELLED,
+                                    opencue.rpc.StatusCode.UNAVAILABLE]:
                         logger.warning(
                             "gRPC connection interrupted during graph update, will retry")
                     else:
