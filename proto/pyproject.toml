@@ -1,7 +1,7 @@
 [build-system]
 requires = [
     "hatchling",
-    "grpcio-tools>=1.62.0",  # Only needed during build time to run protoc
+    "grpcio-tools==1.85.4",
 ]
 build-backend = "hatchling.build"
 
@@ -9,10 +9,10 @@ build-backend = "hatchling.build"
 name = "opencue_proto"
 dynamic = ["version"]
 dependencies = [
-    "protobuf>=5.0.0",       # Only runtime dependency needed
+    "protobuf>=7.0.0,<8.0dev",
     "h2>=4.0.0",
 ]
-requires-python = ">3.7"
+requires-python = ">=3.9"
 description = "The opencue-proto is a module containing the protobuf modules for communication to and from Cuebot."
 readme = "README.md"
 license = {text = "Apache-2.0"}

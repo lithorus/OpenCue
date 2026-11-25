@@ -22,13 +22,13 @@ from __future__ import print_function
 
 from collections import deque
 import enum
-import gzip
 import logging
 import socket
 import struct
 import threading
 import time
 from urllib.parse import quote, unquote
+import zlib
 
 from google.protobuf import symbol_database
 import h2.config
@@ -143,8 +143,70 @@ def _format_grpc_timeout(timeout):
     return "%dS" % secs
 
 
+def _parse_grpc_timeout(timeout_str):
+    if not timeout_str:
+        return None
+    units = {
+        "H": 3600.0,
+        "M": 60.0,
+        "S": 1.0,
+        "m": 0.001,
+        "u": 0.000001,
+        "n": 0.000000001,
+    }
+    unit = timeout_str[-1]
+    if unit in units:
+        try:
+            return float(timeout_str[:-1]) * units[unit]
+        except ValueError:
+            return None
+    return None
+
+
 def _frame_message(payload):
     return struct.pack(">BI", 0, len(payload)) + payload
+
+
+def _decompress_gzip_bounded(payload, max_length=None):
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    buf = bytearray()
+    chunk_size = 65536
+    try:
+        # Feed payload in slices to allow early termination if bounded
+        offset = 0
+        while offset < len(payload):
+            chunk = payload[offset:offset + chunk_size]
+            offset += len(chunk)
+            max_chunk = (max_length + 1 - len(buf)) if max_length else 0
+            decompressed = decompressor.decompress(chunk, max_chunk)
+            buf.extend(decompressed)
+            if max_length and len(buf) > max_length:
+                raise RpcError(
+                    StatusCode.RESOURCE_EXHAUSTED,
+                    "Decompressed message larger than max (%d vs. %d)" % (len(buf), max_length),
+                )
+        unconsumed = decompressor.unconsumed_tail
+        while unconsumed:
+            max_chunk = (max_length + 1 - len(buf)) if max_length else 0
+            decompressed = decompressor.decompress(unconsumed, max_chunk)
+            buf.extend(decompressed)
+            if max_length and len(buf) > max_length:
+                raise RpcError(
+                    StatusCode.RESOURCE_EXHAUSTED,
+                    "Decompressed message larger than max (%d vs. %d)" % (len(buf), max_length),
+                )
+            if not decompressed:
+                break
+            unconsumed = decompressor.unconsumed_tail
+        buf.extend(decompressor.flush())
+        if max_length and len(buf) > max_length:
+            raise RpcError(
+                StatusCode.RESOURCE_EXHAUSTED,
+                "Decompressed message larger than max (%d vs. %d)" % (len(buf), max_length),
+            )
+        return bytes(buf)
+    except zlib.error as exc:
+        raise RpcError(StatusCode.INTERNAL, "Corrupted gzip payload: %s" % exc)
 
 
 def _unframe_message(data, encoding=None, max_length=None):
@@ -164,7 +226,7 @@ def _unframe_message(data, encoding=None, max_length=None):
     payload = data[5:5 + length]
     if compressed == 1:
         if encoding == "gzip":
-            payload = gzip.decompress(payload)
+            payload = _decompress_gzip_bounded(payload, max_length=max_length)
         else:
             raise RpcError(StatusCode.UNIMPLEMENTED, "Unsupported compression: %s" % encoding)
     elif compressed != 0:
@@ -195,18 +257,20 @@ def _http_status_to_grpc(http_status):
     return mapping.get(http_status, StatusCode.UNKNOWN)
 
 
-class _StreamResetBeforeResponse(Exception):
-    """Internal error when a pooled connection fails before receiving response data."""
+class _StreamRefusedBeforeResponse(Exception):
+    """Internal error when a pooled connection stream is refused before processing."""
 
 
 class _Http2ClientConnection(object):
     """Single synchronous HTTP/2 client connection managed via h2."""
 
-    def __init__(self, host, port, timeout=None):
+    def __init__(self, host, port, deadline=None):
         self.host = host
         self.port = port
         self.closed = False
-        self._sock = socket.create_connection((host, port), timeout=timeout)
+        self._protocol_closed = False
+        remaining = self._remaining_timeout(deadline) if deadline is not None else None
+        self._sock = socket.create_connection((host, port), timeout=remaining)
         try:
             self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
@@ -226,6 +290,7 @@ class _Http2ClientConnection(object):
             return None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            self.closed = True
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         return remaining
 
@@ -235,6 +300,7 @@ class _Http2ClientConnection(object):
         try:
             raw = self._sock.recv(65536)
         except socket.timeout:
+            self.closed = True
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         if not raw:
             self.closed = True
@@ -243,8 +309,8 @@ class _Http2ClientConnection(object):
         self._flush()
         return events
 
-    def call(self, method_path, payload, timeout=None, max_send_length=None, max_recv_length=None,
-             reused=False):
+    def call(self, method_path, payload, deadline=None, metadata=None,
+             max_send_length=None, max_recv_length=None, reused=False):
         """Executes an RPC call over HTTP/2."""
         if max_send_length and (0 < max_send_length < len(payload)):
             raise RpcError(
@@ -252,7 +318,6 @@ class _Http2ClientConnection(object):
                 "Sent message larger than max (%d vs. %d)" % (len(payload), max_send_length),
             )
 
-        deadline = (time.monotonic() + float(timeout)) if timeout is not None else None
         framed = _frame_message(payload)
         stream_id = self._conn.get_next_available_stream_id()
 
@@ -269,19 +334,27 @@ class _Http2ClientConnection(object):
             ("te", "trailers"),
             ("user-agent", "opencue-python-http2/1.0"),
         ]
-        timeout_hdr = _format_grpc_timeout(timeout)
+        remaining = self._remaining_timeout(deadline) if deadline is not None else None
+        timeout_hdr = _format_grpc_timeout(remaining)
         if timeout_hdr:
             headers.append(("grpc-timeout", timeout_hdr))
+
+        if metadata:
+            for key, val in metadata:
+                key_str = str(key).lower()
+                if not key_str.startswith(":"):
+                    headers.append((key_str, str(val)))
 
         initial_headers = {}
         trailing_headers = {}
         received_any = False
         data_chunks = []
+        cumulative_recv_len = 0
         stream_ended = False
         stream_reset = None
 
         def _process_events(events):
-            nonlocal stream_ended, stream_reset, received_any
+            nonlocal stream_ended, stream_reset, received_any, cumulative_recv_len
             for event in events:
                 if isinstance(event, h2.events.ResponseReceived) and event.stream_id == stream_id:
                     received_any = True
@@ -289,6 +362,14 @@ class _Http2ClientConnection(object):
                 elif isinstance(event, h2.events.DataReceived) and event.stream_id == stream_id:
                     received_any = True
                     if event.data:
+                        cumulative_recv_len += len(event.data)
+                        if max_recv_length and cumulative_recv_len > (max_recv_length + 5):
+                            self._conn.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
+                            self._flush()
+                            raise RpcError(
+                                StatusCode.RESOURCE_EXHAUSTED,
+                                "Received message exceeds limit of %d bytes" % max_recv_length,
+                            )
                         data_chunks.append(event.data)
                     if event.flow_controlled_length:
                         self._conn.acknowledge_received_data(
@@ -340,18 +421,18 @@ class _Http2ClientConnection(object):
 
             while not stream_ended:
                 _process_events(self._read_events(deadline))
+        except RpcError:
+            if not stream_ended:
+                self.closed = True
+            raise
         except (EOFError, BrokenPipeError, ConnectionResetError, h2.exceptions.H2Error) as exc:
             self.closed = True
-            if reused and not received_any:
-                raise _StreamResetBeforeResponse(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
         except socket.timeout:
             self.closed = True
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         except OSError as exc:
             self.closed = True
-            if reused and not received_any:
-                raise _StreamResetBeforeResponse(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
 
         if (stream_reset is not None and not trailing_headers
@@ -360,7 +441,7 @@ class _Http2ClientConnection(object):
                 raise RpcError(StatusCode.CANCELLED, "Stream cancelled")
             if stream_reset == h2.errors.ErrorCodes.REFUSED_STREAM:
                 if reused and not received_any:
-                    raise _StreamResetBeforeResponse("Stream refused")
+                    raise _StreamRefusedBeforeResponse("Stream refused")
                 raise RpcError(StatusCode.UNAVAILABLE, "Stream refused")
             raise RpcError(StatusCode.INTERNAL, "HTTP/2 stream reset: %s" % stream_reset)
 
@@ -397,17 +478,17 @@ class _Http2ClientConnection(object):
 
     def close(self):
         """Closes the underlying socket and terminates the HTTP/2 connection."""
-        if self.closed:
-            return
+        if not self._protocol_closed:
+            self._protocol_closed = True
+            try:
+                self._conn.close_connection()
+                out = self._conn.data_to_send()
+                if out:
+                    self._sock.settimeout(0.5)
+                    self._sock.sendall(out)
+            except OSError:
+                pass
         self.closed = True
-        try:
-            self._conn.close_connection()
-            out = self._conn.data_to_send()
-            if out:
-                self._sock.settimeout(0.5)
-                self._sock.sendall(out)
-        except OSError:
-            pass
         try:
             self._sock.close()
         except OSError:
@@ -425,7 +506,7 @@ class _UnaryUnaryMultiCallable(object):
 
     def __call__(self, request, timeout=None, metadata=None, credentials=None):
         payload = self._request_serializer(request) if self._request_serializer else request
-        raw_response = self._channel._invoke(self._method, payload, timeout=timeout)
+        raw_response = self._channel._invoke(self._method, payload, timeout=timeout, metadata=metadata)
         if self._response_deserializer:
             return self._response_deserializer(raw_response)
         return raw_response
@@ -446,20 +527,21 @@ class Http2Channel(object):
                     self._max_recv_length = int(value)
         self._max_pool_size = max_pool_size
         self._pool = deque()
+        self._active = set()
         self._lock = threading.Lock()
         self._closed = False
 
-    def _acquire(self, timeout=None):
+    def _acquire(self, deadline=None):
         with self._lock:
             if self._closed:
                 raise RpcError(StatusCode.UNAVAILABLE, "Channel is closed")
             while self._pool:
                 conn = self._pool.pop()
                 if not conn.closed:
+                    self._active.add(conn)
                     return conn, True
         try:
-            conn = _Http2ClientConnection(self._host, self._port, timeout=timeout)
-            return conn, False
+            conn = _Http2ClientConnection(self._host, self._port, deadline=deadline)
         except socket.timeout:
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Connection timed out")
         except OSError as exc:
@@ -467,35 +549,45 @@ class Http2Channel(object):
                 self._host, self._port, exc
             ))
 
-    def _release(self, conn):
-        if conn.closed:
-            conn.close()
-            return
         with self._lock:
-            if self._closed or len(self._pool) >= self._max_pool_size:
+            if self._closed:
+                conn.close()
+                raise RpcError(StatusCode.UNAVAILABLE, "Channel is closed")
+            self._active.add(conn)
+            return conn, False
+
+    def _release(self, conn):
+        with self._lock:
+            self._active.discard(conn)
+            if conn.closed or self._closed or len(self._pool) >= self._max_pool_size:
                 conn.close()
             else:
                 self._pool.append(conn)
 
-    def _invoke(self, method_path, payload, timeout=None):
-        conn, reused = self._acquire(timeout=timeout)
+    def _invoke(self, method_path, payload, timeout=None, metadata=None):
+        deadline = (time.monotonic() + float(timeout)) if timeout is not None else None
+        conn, reused = self._acquire(deadline=deadline)
         try:
             try:
                 return conn.call(
                     method_path,
                     payload,
-                    timeout=timeout,
+                    deadline=deadline,
+                    metadata=metadata,
                     max_send_length=self._max_send_length,
                     max_recv_length=self._max_recv_length,
                     reused=reused,
                 )
-            except _StreamResetBeforeResponse:
+            except _StreamRefusedBeforeResponse:
                 conn.close()
-                conn, _ = self._acquire(timeout=timeout)
+                if deadline is not None and (deadline - time.monotonic()) <= 0:
+                    raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
+                conn, _ = self._acquire(deadline=deadline)
                 return conn.call(
                     method_path,
                     payload,
-                    timeout=timeout,
+                    deadline=deadline,
+                    metadata=metadata,
                     max_send_length=self._max_send_length,
                     max_recv_length=self._max_recv_length,
                     reused=False,
@@ -513,12 +605,14 @@ class Http2Channel(object):
         )
 
     def close(self):
-        """Closes all pooled connections and marks channel as closed."""
+        """Closes all pooled and active connections and marks channel as closed."""
         with self._lock:
             self._closed = True
-            while self._pool:
-                conn = self._pool.pop()
-                conn.close()
+            to_close = list(self._pool) + list(self._active)
+            self._pool.clear()
+            self._active.clear()
+        for conn in to_close:
+            conn.close()
 
 
 class _InterceptedUnaryUnaryCallable(object):
@@ -664,7 +758,9 @@ class _ServerConnectionHandler(object):
         self._write_lock = threading.Lock()
         self._window_cond = threading.Condition(self._write_lock)
         self._closed = False
+        self._protocol_closed = False
         self._streams = {}
+        self._reset_streams = set()
 
     def _flush_locked(self):
         out = self._conn.data_to_send()
@@ -680,15 +776,17 @@ class _ServerConnectionHandler(object):
         if message:
             headers.append(("grpc-message", _encode_grpc_message(message)))
         with self._write_lock:
-            if self._closed:
+            if self._closed or stream_id in self._reset_streams:
                 return
             try:
                 self._conn.send_headers(stream_id, headers, end_stream=True)
                 self._flush_locked()
+            except h2.exceptions.StreamClosedError:
+                self._reset_streams.add(stream_id)
             except (OSError, h2.exceptions.H2Error):
                 self._closed = True
 
-    def _send_response(self, stream_id, payload, status_code=StatusCode.OK, message=""):
+    def _send_response(self, stream_id, payload, status_code=StatusCode.OK, message="", deadline=None):
         framed = _frame_message(payload)
         init_headers = [
             (":status", "200"),
@@ -701,7 +799,7 @@ class _ServerConnectionHandler(object):
             trailers.append(("grpc-message", _encode_grpc_message(message)))
 
         with self._write_lock:
-            if self._closed:
+            if self._closed or stream_id in self._reset_streams:
                 return
             try:
                 self._conn.send_headers(stream_id, init_headers)
@@ -711,11 +809,22 @@ class _ServerConnectionHandler(object):
                 total = len(framed)
                 while offset < total:
                     window = self._conn.local_flow_control_window(stream_id)
-                    while window <= 0 and not self._closed:
-                        self._window_cond.wait(timeout=0.5)
-                        if self._closed:
+                    while window <= 0 and not self._closed and stream_id not in self._reset_streams:
+                        now = time.monotonic()
+                        if deadline is not None and now >= deadline:
+                            try:
+                                self._conn.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
+                                self._flush_locked()
+                            except (OSError, h2.exceptions.H2Error):
+                                pass
+                            self._reset_streams.add(stream_id)
+                            return
+                        wait_timeout = min(0.5, max(0.01, deadline - now)) if deadline is not None else 0.5
+                        self._window_cond.wait(timeout=wait_timeout)
+                        if self._closed or stream_id in self._reset_streams:
                             return
                         window = self._conn.local_flow_control_window(stream_id)
+
                     chunk_size = min(window, self._conn.max_outbound_frame_size, total - offset)
                     self._conn.send_data(stream_id, framed[offset:offset + chunk_size])
                     self._flush_locked()
@@ -723,41 +832,63 @@ class _ServerConnectionHandler(object):
 
                 self._conn.send_headers(stream_id, trailers, end_stream=True)
                 self._flush_locked()
+            except h2.exceptions.StreamClosedError:
+                self._reset_streams.add(stream_id)
             except (OSError, h2.exceptions.H2Error):
                 self._closed = True
 
-    def _dispatch_rpc(self, stream_id, headers, body):
-        path = headers.get(":path", "")
-        entry = self._server.lookup_method(path)
-        if entry is None:
-            self._send_trailers_only(
-                stream_id, StatusCode.UNIMPLEMENTED, "Method not found: %s" % path
-            )
-            return
-
-        req_cls, handler = entry
+    def _dispatch_rpc(self, stream_id, headers, body, deadline=None):
         try:
-            encoding = headers.get("grpc-encoding")
-            req_bytes = _unframe_message(body, encoding=encoding)
-            request = req_cls.FromString(req_bytes)
-        except Exception as exc:  # pylint: disable=broad-except
-            self._send_trailers_only(stream_id, StatusCode.INVALID_ARGUMENT, str(exc))
-            return
+            if self._server.is_stopped:
+                self._send_trailers_only(
+                    stream_id, StatusCode.UNAVAILABLE, "Server is stopping"
+                )
+                return
 
-        ctx = RpcContext()
-        try:
-            response = handler(request, ctx)
-        except Exception as exc:  # pylint: disable=broad-except
-            log.exception("Unhandled exception in RPC handler for %s", path)
-            self._send_trailers_only(stream_id, StatusCode.INTERNAL, str(exc))
-            return
+            if deadline is not None and time.monotonic() >= deadline:
+                self._send_trailers_only(
+                    stream_id, StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded before execution"
+                )
+                return
 
-        if ctx.code() != StatusCode.OK:
-            self._send_trailers_only(stream_id, ctx.code(), ctx.details())
-            return
+            path = headers.get(":path", "")
+            entry = self._server.lookup_method(path)
+            if entry is None:
+                self._send_trailers_only(
+                    stream_id, StatusCode.UNIMPLEMENTED, "Method not found: %s" % path
+                )
+                return
 
-        resp_bytes = response.SerializeToString() if response is not None else b""
-        self._send_response(stream_id, resp_bytes, StatusCode.OK)
+            req_cls, handler = entry
+            try:
+                encoding = headers.get("grpc-encoding")
+                req_bytes = _unframe_message(
+                    body, encoding=encoding, max_length=self._server._max_recv_length
+                )
+                request = req_cls.FromString(req_bytes)
+            except RpcError as exc:
+                self._send_trailers_only(stream_id, exc.code(), exc.details())
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_trailers_only(stream_id, StatusCode.INVALID_ARGUMENT, str(exc))
+                return
+
+            ctx = RpcContext()
+            try:
+                response = handler(request, ctx)
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Unhandled exception in RPC handler for %s", path)
+                self._send_trailers_only(stream_id, StatusCode.INTERNAL, str(exc))
+                return
+
+            if ctx.code() != StatusCode.OK:
+                self._send_trailers_only(stream_id, ctx.code(), ctx.details())
+                return
+
+            resp_bytes = response.SerializeToString() if response is not None else b""
+            self._send_response(stream_id, resp_bytes, StatusCode.OK, deadline=deadline)
+        finally:
+            self._server.active_calls_decrement()
 
     def serve(self):
         """Serves the connection until closed or server stops."""
@@ -791,14 +922,32 @@ class _ServerConnectionHandler(object):
 
                     for event in events:
                         if isinstance(event, h2.events.RequestReceived):
+                            hdrs = _decode_headers(event.headers)
+                            timeout_val = _parse_grpc_timeout(hdrs.get("grpc-timeout"))
+                            deadline = (time.monotonic() + timeout_val) if timeout_val is not None else None
                             self._streams[event.stream_id] = {
-                                "headers": _decode_headers(event.headers),
+                                "headers": hdrs,
                                 "chunks": [],
+                                "bytes_received": 0,
+                                "rejected": False,
+                                "deadline": deadline,
                             }
                         elif isinstance(event, h2.events.DataReceived):
                             stream = self._streams.get(event.stream_id)
-                            if stream is not None and event.data:
-                                stream["chunks"].append(event.data)
+                            if stream is not None and not stream.get("rejected"):
+                                if event.data:
+                                    stream["bytes_received"] += len(event.data)
+                                    max_len = self._server._max_recv_length
+                                    if max_len and stream["bytes_received"] > (max_len + 5):
+                                        stream["rejected"] = True
+                                        stream["chunks"].clear()
+                                        self._send_trailers_only(
+                                            event.stream_id,
+                                            StatusCode.RESOURCE_EXHAUSTED,
+                                            "Received message larger than max (%d bytes)" % max_len,
+                                        )
+                                    else:
+                                        stream["chunks"].append(event.data)
                             if event.flow_controlled_length:
                                 self._conn.acknowledge_received_data(
                                     event.flow_controlled_length, event.stream_id
@@ -807,12 +956,14 @@ class _ServerConnectionHandler(object):
                             self._window_cond.notify_all()
                         elif isinstance(event, h2.events.StreamEnded):
                             stream = self._streams.pop(event.stream_id, None)
-                            if stream is not None:
+                            if stream is not None and not stream.get("rejected"):
                                 pending_dispatches.append(
-                                    (event.stream_id, stream["headers"], b"".join(stream["chunks"]))
+                                    (event.stream_id, stream["headers"], b"".join(stream["chunks"]), stream["deadline"])
                                 )
                         elif isinstance(event, h2.events.StreamReset):
                             self._streams.pop(event.stream_id, None)
+                            self._reset_streams.add(event.stream_id)
+                            self._window_cond.notify_all()
                         elif isinstance(event, h2.events.ConnectionTerminated):
                             self._closed = True
                             self._window_cond.notify_all()
@@ -822,26 +973,27 @@ class _ServerConnectionHandler(object):
                     except OSError:
                         break
 
-                for stream_id, hdrs, body in pending_dispatches:
-                    self._server.submit_task(self._dispatch_rpc, stream_id, hdrs, body)
+                for stream_id, hdrs, body, deadline in pending_dispatches:
+                    self._server.active_calls_increment()
+                    self._server.submit_task(self._dispatch_rpc, stream_id, hdrs, body, deadline)
         finally:
             self.close()
 
     def close(self):
         """Closes the client connection and releases socket resources."""
         with self._write_lock:
-            if self._closed:
-                return
+            if not self._protocol_closed:
+                self._protocol_closed = True
+                self._window_cond.notify_all()
+                try:
+                    self._conn.close_connection()
+                    out = self._conn.data_to_send()
+                    if out:
+                        self._sock.settimeout(0.2)
+                        self._sock.sendall(out)
+                except OSError:
+                    pass
             self._closed = True
-            self._window_cond.notify_all()
-            try:
-                self._conn.close_connection()
-                out = self._conn.data_to_send()
-                if out:
-                    self._sock.settimeout(0.2)
-                    self._sock.sendall(out)
-            except OSError:
-                pass
             try:
                 self._sock.close()
             except OSError:
@@ -851,8 +1003,15 @@ class _ServerConnectionHandler(object):
 class Http2Server(object):
     """Pure-Python HTTP/2 gRPC server backed by h2 and a ThreadPoolExecutor."""
 
-    def __init__(self, thread_pool):
+    DEFAULT_MAX_RECEIVE_MESSAGE_LENGTH = 4 * 1024 * 1024
+
+    def __init__(self, thread_pool, options=None):
         self._thread_pool = thread_pool
+        self._max_recv_length = self.DEFAULT_MAX_RECEIVE_MESSAGE_LENGTH
+        if options:
+            for key, value in options:
+                if key == "grpc.max_receive_message_length":
+                    self._max_recv_length = int(value)
         self._methods = {}
         self._methods_lock = threading.Lock()
         self._listen_socks = []
@@ -861,11 +1020,26 @@ class Http2Server(object):
         self._accept_threads = []
         self._conn_handlers = set()
         self._conn_lock = threading.Lock()
+        self._active_calls = 0
+        self._calls_lock = threading.Lock()
+        self._calls_zero_cond = threading.Condition(self._calls_lock)
 
     @property
     def is_stopped(self):
         """Returns whether the server has been requested to stop."""
         return self._stop_event.is_set()
+
+    def active_calls_increment(self):
+        """Increments active running RPC dispatch count."""
+        with self._calls_lock:
+            self._active_calls += 1
+
+    def active_calls_decrement(self):
+        """Decrements active running RPC dispatch count."""
+        with self._calls_lock:
+            self._active_calls -= 1
+            if self._active_calls <= 0:
+                self._calls_zero_cond.notify_all()
 
     def add_insecure_port(self, address):
         """Binds the server to an insecure TCP port."""
@@ -965,6 +1139,16 @@ class Http2Server(object):
                 sock.close()
             except OSError:
                 pass
+
+        if grace and grace > 0:
+            grace_deadline = time.monotonic() + grace
+            with self._calls_lock:
+                while self._active_calls > 0:
+                    remaining = grace_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._calls_zero_cond.wait(timeout=min(0.2, remaining))
+
         with self._conn_lock:
             handlers = list(self._conn_handlers)
         for handler in handlers:
@@ -974,6 +1158,6 @@ class Http2Server(object):
             thread.join(timeout=timeout)
 
 
-def server(thread_pool, *_args, **_kwargs):
+def server(thread_pool, options=None, *_args, **_kwargs):
     """Creates and returns an Http2Server instance."""
-    return Http2Server(thread_pool)
+    return Http2Server(thread_pool, options=options)
