@@ -461,6 +461,8 @@ class _Http2ClientConnection(object):
             self.closed = True
             if (trailing_headers or "grpc-status" in initial_headers) and not stream_ended:
                 stream_ended = True
+            elif reused and not received_any:
+                raise _StaleConnectionError(str(exc))
             else:
                 raise RpcError(StatusCode.UNAVAILABLE, str(exc))
         except socket.timeout:
@@ -468,6 +470,8 @@ class _Http2ClientConnection(object):
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         except OSError as exc:
             self.closed = True
+            if reused and not received_any:
+                raise _StaleConnectionError(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
 
         if (stream_reset is not None and not trailing_headers
@@ -614,7 +618,7 @@ class Http2Channel(object):
                     max_recv_length=self._max_recv_length,
                     reused=reused,
                 )
-            except _StreamRefusedBeforeResponse:
+            except (_StreamRefusedBeforeResponse, _StaleConnectionError):
                 conn.close()
                 if deadline is not None and (deadline - time.monotonic()) <= 0:
                     raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
