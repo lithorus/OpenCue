@@ -218,10 +218,10 @@ def _unframe_message(data, encoding=None, max_length=None):
             StatusCode.RESOURCE_EXHAUSTED,
             "Received message larger than max (%d vs. %d)" % (length, max_length),
         )
-    if len(data) < 5 + length:
+    if len(data) != 5 + length:
         raise RpcError(
             StatusCode.INTERNAL,
-            "Truncated gRPC message (expected %d bytes, got %d)" % (length, len(data) - 5),
+            "Truncated or corrupted gRPC message (expected %d bytes, got %d)" % (length, len(data) - 5),
         )
     payload = data[5:5 + length]
     if compressed == 1:
@@ -490,6 +490,9 @@ class _Http2ClientConnection(object):
         )
         grpc_message = unquote(raw_message) if raw_message else ""
 
+        content_type = initial_headers.get("content-type", "")
+        is_grpc_content = content_type.startswith("application/grpc")
+
         if raw_status is None:
             http_status_str = initial_headers.get(":status")
             try:
@@ -507,7 +510,17 @@ class _Http2ClientConnection(object):
             raise RpcError(status_code, grpc_message)
 
         status_code = StatusCode.from_int(raw_status)
-        if status_code != StatusCode.OK:
+        if status_code == StatusCode.OK:
+            http_status_str = initial_headers.get(":status")
+            if http_status_str and http_status_str != "200":
+                try:
+                    http_status = int(http_status_str)
+                except ValueError:
+                    http_status = 0
+                raise RpcError(_http_status_to_grpc(http_status), "HTTP status %s" % http_status_str)
+            if not is_grpc_content and "content-type" in initial_headers:
+                raise RpcError(StatusCode.INTERNAL, "Invalid content-type: %s" % content_type)
+        else:
             raise RpcError(status_code, grpc_message)
 
         encoding = initial_headers.get("grpc-encoding")
@@ -525,7 +538,7 @@ class _Http2ClientConnection(object):
                 if out:
                     self._sock.settimeout(0.5)
                     self._sock.sendall(out)
-            except OSError:
+            except (OSError, h2.exceptions.H2Error):
                 pass
         self.closed = True
         try:
@@ -891,6 +904,20 @@ class _ServerConnectionHandler(object):
                 )
                 return
 
+            method = headers.get(":method", "")
+            if method != "POST":
+                self._send_trailers_only(
+                    stream_id, StatusCode.INTERNAL, "Method not allowed: %s" % method
+                )
+                return
+
+            content_type = headers.get("content-type", "")
+            if not content_type.startswith("application/grpc"):
+                self._send_trailers_only(
+                    stream_id, StatusCode.UNKNOWN, "Unsupported media type: %s" % content_type
+                )
+                return
+
             path = headers.get(":path", "")
             entry = self._server.lookup_method(path)
             if entry is None:
@@ -925,7 +952,12 @@ class _ServerConnectionHandler(object):
                 self._send_trailers_only(stream_id, ctx.code(), ctx.details())
                 return
 
-            resp_bytes = response.SerializeToString() if response is not None else b""
+            try:
+                resp_bytes = response.SerializeToString() if response is not None else b""
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_trailers_only(stream_id, StatusCode.INTERNAL, "Serialization error: %s" % exc)
+                return
+
             self._send_response(stream_id, resp_bytes, StatusCode.OK, deadline=deadline)
         finally:
             self._server.active_calls_decrement()
@@ -1107,10 +1139,19 @@ class Http2Server(object):
             family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
             sock = socket.socket(family, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((bind_host, port))
+            try:
+                sock.bind((bind_host, port))
+            except OSError:
+                sock.close()
+                raise
 
-        sock.listen(128)
-        sock.settimeout(0.5)
+        try:
+            sock.listen(128)
+            sock.settimeout(0.5)
+        except OSError:
+            sock.close()
+            raise
+
         actual_port = sock.getsockname()[1]
         self._listen_socks.append(sock)
         self._bound_ports.append(actual_port)

@@ -34,7 +34,6 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
-import mock
 
 from opencue_proto import cue_pb2
 from opencue_proto import host_pb2
@@ -113,6 +112,8 @@ class _MiniHttp2GrpcServer(object):
                             ev2.flow_controlled_length, ev2.stream_id
                         )
                 win = conn.local_flow_control_window(stream_id)
+            if self._stop.is_set():
+                return
             chunk = min(win, conn.max_outbound_frame_size, len(framed) - offset)
             conn.send_data(stream_id, framed[offset:offset + chunk])
             offset += chunk
@@ -383,12 +384,15 @@ class RpcTransportTests(unittest.TestCase):
 
     def test_stale_pooled_connection_reconnects(self):
         calls = [0]
+        closed_event = threading.Event()
 
         def handler(_headers, _payload):
             calls[0] += 1
             resp = cue_pb2.CueGetSystemStatsResponse(
                 stats=cue_pb2.SystemStats(booked_procs=calls[0])
             )
+            if calls[0] == 1:
+                closed_event.set()
             # Force connection drop right after first response so second call hits stale socket
             return rpc.StatusCode.OK, "", resp.SerializeToString(), (calls[0] == 1)
 
@@ -397,6 +401,7 @@ class RpcTransportTests(unittest.TestCase):
         try:
             stub = _CueStub(channel)
             first = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
+            self.assertTrue(closed_event.wait(timeout=2.0))
             time.sleep(0.05)
             second = stub.GetSystemStats(cue_pb2.CueGetSystemStatsRequest(), timeout=5)
             self.assertEqual(1, first.stats.booked_procs)
@@ -407,9 +412,15 @@ class RpcTransportTests(unittest.TestCase):
             srv.stop()
 
     def test_works_without_grpc_module(self):
-        with mock.patch.dict(sys.modules, {"grpc": None}):
-            self.assertIn("cue", opencue.cuebot.Cuebot.SERVICE_MAP)
-            self.assertIsNone(sys.modules.get("grpc"))
+        import subprocess
+        code = (
+            "import sys; sys.modules['grpc'] = None; "
+            "import opencue.cuebot; "
+            "assert 'cue' in opencue.cuebot.Cuebot.SERVICE_MAP; "
+            "assert sys.modules.get('grpc') is None"
+        )
+        res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(0, res.returncode, res.stderr)
 
 
 if __name__ == "__main__":

@@ -26,8 +26,6 @@ import threading
 import time
 import unittest
 
-import mock
-
 import opencue_proto.report_pb2
 import opencue_proto.rqd_pb2
 from opencue_proto import rpc
@@ -210,13 +208,26 @@ class RqRpcTests(unittest.TestCase):
         )
         try:
             stub = rqd.cuerqd.RqdInterfaceStub(channel)
-            # Non-retryable NOT_FOUND should raise immediately
+            # Non-retryable NOT_FOUND should raise immediately without retrying
             with self.assertRaises(rpc.RpcError) as ctx:
                 stub.GetRunFrame(
                     opencue_proto.rqd_pb2.RqdStaticGetRunFrameRequest(frame_id="missing"),
                     timeout=5,
                 )
             self.assertEqual(rpc.StatusCode.NOT_FOUND, ctx.exception.code())
+
+            # Retry interceptor succeeds after transient UNAVAILABLE
+            attempts = [0]
+            def flaky_continuation(details, req):
+                attempts[0] += 1
+                if attempts[0] == 1:
+                    raise rpc.RpcError(rpc.StatusCode.UNAVAILABLE, "transient error")
+                return "success"
+            res = interceptor.intercept_unary_unary(
+                flaky_continuation, rpc.ClientCallDetails(method="test"), None
+            )
+            self.assertEqual("success", res)
+            self.assertEqual(2, attempts[0])
         finally:
             channel.close()
             srv.stop(0)
@@ -236,11 +247,14 @@ class RqRpcTests(unittest.TestCase):
             closed_channel.close()
 
     def test_rqd_modules_work_without_grpc(self):
-        with mock.patch.dict(sys.modules, {"grpc": None}):
-            self.assertIsNone(sys.modules.get("grpc"))
-            rqd_core = mock.MagicMock()
-            servicer = rqd.rqdservicers.RqdInterfaceServicer(rqd_core)
-            self.assertTrue(hasattr(servicer, "ReportStatus"))
+        import subprocess
+        code = (
+            "import sys; sys.modules['grpc'] = None; "
+            "import rqd.cuerqd; import rqd.rqdservicers; import rqd.rqnetwork; "
+            "assert sys.modules.get('grpc') is None"
+        )
+        res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(0, res.returncode, res.stderr)
 
 
 if __name__ == "__main__":
