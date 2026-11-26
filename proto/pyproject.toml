@@ -1,7 +1,7 @@
 [build-system]
 requires = [
     "hatchling",
-    "grpcio-tools==1.85.4",
+    "grpcio-tools==1.75.1",
 ]
 build-backend = "hatchling.build"
 
@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 name = "opencue_proto"
 dynamic = ["version"]
 dependencies = [
-    "protobuf>=7.0.0,<8.0dev",
+    "protobuf>=6.32.0,<7.0dev",
     "h2>=4.0.0",
 ]
 requires-python = ">=3.9"
