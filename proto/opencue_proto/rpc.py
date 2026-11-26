@@ -385,8 +385,7 @@ class _Http2ClientConnection(object):
                 elif isinstance(event, h2.events.DataReceived) and event.stream_id == stream_id:
                     received_any = True
                     if event.data:
-                        cumulative_recv_len += len(event.data)
-                        if max_recv_length and cumulative_recv_len > (max_recv_length + 5):
+                        if max_recv_length and (cumulative_recv_len + len(event.data)) > (max_recv_length + 5):
                             try:
                                 self._conn.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
                                 self._flush()
@@ -396,6 +395,7 @@ class _Http2ClientConnection(object):
                                 StatusCode.RESOURCE_EXHAUSTED,
                                 "Received message exceeds limit of %d bytes" % max_recv_length,
                             )
+                        cumulative_recv_len += len(event.data)
                         data_chunks.append(event.data)
                     if event.flow_controlled_length:
                         self._conn.acknowledge_received_data(
@@ -461,8 +461,6 @@ class _Http2ClientConnection(object):
             self.closed = True
             if (trailing_headers or "grpc-status" in initial_headers) and not stream_ended:
                 stream_ended = True
-            elif reused and not received_any:
-                raise _StaleConnectionError(str(exc))
             else:
                 raise RpcError(StatusCode.UNAVAILABLE, str(exc))
         except socket.timeout:
@@ -470,8 +468,6 @@ class _Http2ClientConnection(object):
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         except OSError as exc:
             self.closed = True
-            if reused and not received_any:
-                raise _StaleConnectionError(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
 
         if (stream_reset is not None and not trailing_headers
@@ -618,7 +614,7 @@ class Http2Channel(object):
                     max_recv_length=self._max_recv_length,
                     reused=reused,
                 )
-            except (_StreamRefusedBeforeResponse, _StaleConnectionError):
+            except _StreamRefusedBeforeResponse:
                 conn.close()
                 if deadline is not None and (deadline - time.monotonic()) <= 0:
                     raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
@@ -976,17 +972,21 @@ class _ServerConnectionHandler(object):
                             stream = self._streams.get(event.stream_id)
                             if stream is not None and not stream.get("rejected"):
                                 if event.data:
-                                    stream["bytes_received"] += len(event.data)
                                     max_len = self._server._max_recv_length
-                                    if max_len and stream["bytes_received"] > (max_len + 5):
+                                    if max_len and (stream["bytes_received"] + len(event.data)) > (max_len + 5):
                                         stream["rejected"] = True
                                         stream["chunks"].clear()
+                                        try:
+                                            self._conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
+                                        except (OSError, h2.exceptions.H2Error):
+                                            pass
                                         self._send_trailers_only(
                                             event.stream_id,
                                             StatusCode.RESOURCE_EXHAUSTED,
                                             "Received message larger than max (%d bytes)" % max_len,
                                         )
                                     else:
+                                        stream["bytes_received"] += len(event.data)
                                         stream["chunks"].append(event.data)
                             if event.flow_controlled_length:
                                 self._conn.acknowledge_received_data(
