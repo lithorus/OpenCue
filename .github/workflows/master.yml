@@ -68,7 +68,7 @@ jobs:
     name: Python
     uses: ./.github/workflows/python.yml
     with:
-      packages: '["pycue", "pyoutline", "cueadmin", "cueman", "cuecmd", "cuenimby", "rqd"]'
+      packages: '["proto", "pycue", "pyoutline", "cueadmin", "cueman", "cuecmd", "cuenimby", "rqd"]'
       qt-packages: '["cuesubmit", "cuegui"]'
 
   api-docs:
