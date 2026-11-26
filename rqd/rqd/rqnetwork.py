@@ -32,17 +32,10 @@ import platform
 import subprocess
 import time
 
-# Disable GRPC fork support to avoid the warning:
-#  "fork_posix.cc Other threads are currently calling into gRPC, skipping fork() handlers"
-# Adding this environment variable doesn't change the server behaviour
-os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
+from opencue_proto import report_pb2
+from opencue_proto import rqd_pb2
+from opencue_proto import rpc
 
-# pylint: disable=wrong-import-position
-import grpc
-
-import opencue_proto.report_pb2
-import opencue_proto.report_pb2_grpc
-import opencue_proto.rqd_pb2_grpc
 import rqd.rqconstants
 import rqd.rqexceptions
 import rqd.rqdservicers
@@ -50,6 +43,9 @@ import rqd.rqutil
 
 
 log = logging.getLogger(__name__)
+
+RqdReportInterfaceStub = rpc.stub_factory(
+    report_pb2, 'RqdReportInterface')
 
 
 class RunningFrame(object):
@@ -89,7 +85,7 @@ class RunningFrame(object):
 
     def runningFrameInfo(self):
         """Returns the RunningFrameInfo object"""
-        runningFrameInfo = opencue_proto.report_pb2.RunningFrameInfo(
+        runningFrameInfo = report_pb2.RunningFrameInfo(
             resource_id=self.runFrame.resource_id,
             job_id=self.runFrame.job_id,
             job_name=self.runFrame.job_name,
@@ -123,11 +119,11 @@ class RunningFrame(object):
         :return: serialized children proc host stats
         :rtype: opencue_proto.report_pb2.ChildrenProcStats
         """
-        childrenProc = opencue_proto.report_pb2.ChildrenProcStats()
+        childrenProc = report_pb2.ChildrenProcStats()
         for proc, values in self.childrenProcs.items():
-            procStats = opencue_proto.report_pb2.ProcStats()
-            procStatFile = opencue_proto.report_pb2.Stat()
-            procStatmFile = opencue_proto.report_pb2.Statm()
+            procStats = report_pb2.ProcStats()
+            procStatFile = report_pb2.Stat()
+            procStatmFile = report_pb2.Statm()
 
             procStatFile.pid = proc
             procStatFile.name = values["name"] if values["name"] else ""
@@ -196,7 +192,7 @@ class GrpcServer(object):
 
     def __init__(self, rqCore):
         self.rqCore = rqCore
-        self.server = grpc.server(
+        self.server = rpc.server(
             futures.ThreadPoolExecutor(max_workers=rqd.rqconstants.RQD_GRPC_MAX_WORKERS))
         self.servicers = ['RqdInterfaceServicer']
         listenAddress = "[::]"
@@ -208,9 +204,11 @@ class GrpcServer(object):
     def addServicers(self):
         """Registers the gRPC servicers defined in rqdservicers.py."""
         for servicer in self.servicers:
-            addFunc = getattr(opencue_proto.rqd_pb2_grpc, 'add_{0}_to_server'.format(servicer))
+            service_name = (
+                servicer[:-len('Servicer')] if servicer.endswith('Servicer') else servicer
+            )
             servicerClass = getattr(rqd.rqdservicers, servicer)
-            addFunc(servicerClass(self.rqCore), self.server)
+            self.server.add_service(rqd_pb2, service_name, servicerClass(self.rqCore))
 
     def connectGrpcWithRetries(self):
         """Connects to the Cuebot gRPC, with built-in retries."""
@@ -218,9 +216,9 @@ class GrpcServer(object):
             try:
                 self.rqCore.grpcConnected()
                 break
-            except grpc.RpcError as exc:
+            except rpc.RpcError as exc:
                 # pylint: disable=no-member
-                if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                if exc.code() == rpc.StatusCode.UNAVAILABLE:
                     log.warning(
                         'GRPC connection failed. Retrying in %s seconds',
                         rqd.rqconstants.RQD_GRPC_CONNECTION_ATTEMPT_SLEEP_SEC)
@@ -292,7 +290,7 @@ class Network(object):
                     sleeping_policy=ExponentialBackoff(init_backoff_ms=100,
                                                        max_backoff_ms=1600,
                                                        multiplier=2),
-                    status_for_retry=(grpc.StatusCode.UNAVAILABLE,),
+                    status_for_retry=(rpc.StatusCode.UNAVAILABLE,),
                 ),
             )
 
@@ -300,32 +298,32 @@ class Network(object):
             if len(cuebots) == 0:
                 raise rqd.rqexceptions.RqdException("CUEBOT_HOSTNAME is empty")
             shuffle(cuebots)
-            self.channel = grpc.insecure_channel('%s:%s' % (cuebots[0],
-                                                            rqd.rqconstants.CUEBOT_GRPC_PORT))
-            self.channel = grpc.intercept_channel(self.channel, *interceptors)
+            self.channel = rpc.insecure_channel('%s:%s' % (cuebots[0],
+                                                                 rqd.rqconstants.CUEBOT_GRPC_PORT))
+            self.channel = rpc.intercept_channel(self.channel, *interceptors)
             atexit.register(self.closeChannel)
 
     def __getReportStub(self):
         self.__getChannel()
-        return opencue_proto.report_pb2_grpc.RqdReportInterfaceStub(self.channel)
+        return RqdReportInterfaceStub(self.channel)
 
     def reportRqdStartup(self, report):
         """Wraps the ability to send a startup report to rqd via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportRqdStartupRequest(boot_report=report)
+        request = report_pb2.RqdReportRqdStartupRequest(boot_report=report)
         stub.ReportRqdStartup(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
     def reportStatus(self, report):
         """Wraps the ability to send a status report to the cuebot via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportStatusRequest(host_report=report)
+        request = report_pb2.RqdReportStatusRequest(host_report=report)
         stub.ReportStatus(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
     def reportRunningFrameCompletion(self, report):
         """Wraps the ability to send a running frame completion report
            to the cuebot via grpc"""
         stub = self.__getReportStub()
-        request = opencue_proto.report_pb2.RqdReportRunningFrameCompletionRequest(
+        request = report_pb2.RqdReportRunningFrameCompletionRequest(
             frame_complete_report=report)
         stub.ReportRunningFrameCompletion(request, timeout=rqd.rqconstants.RQD_TIMEOUT)
 
@@ -370,15 +368,12 @@ class ExponentialBackoff(SleepingPolicy):
         time.sleep(sleep_time_ms / 1000.0)
 
 
-class RetryOnRpcErrorClientInterceptor(
-    grpc.UnaryUnaryClientInterceptor,
-    grpc.StreamUnaryClientInterceptor
-):
+class RetryOnRpcErrorClientInterceptor(rpc.UnaryUnaryClientInterceptor):
     """
     Implement Client/Stream interceptors for GRPC channels to retry
     calls that failed with retry-able states. This is required for
     handling server interruptions that are not automatically handled
-    by grpc.insecure_channel
+    by insecure_channel
     """
     def __init__(self,
                  max_attempts,
@@ -395,10 +390,10 @@ class RetryOnRpcErrorClientInterceptor(
             try:
                 return continuation(client_call_details,
                                     request_or_iterator)
-            except grpc.RpcError as response:
-                # Return if it was last attempt
+            except rpc.RpcError as response:
+                # Raise if it was last attempt
                 if attempt == (self._max_attempts - 1):
-                    return response
+                    raise
 
                 # If status code is not in retryable status codes
                 # pylint: disable=no-member
@@ -406,7 +401,7 @@ class RetryOnRpcErrorClientInterceptor(
                         and hasattr(response, 'code') \
                         and response.code() \
                         not in self._retry_statuses:
-                    return response
+                    raise
 
                 self._sleeping_policy.sleep(attempt)
 
@@ -414,9 +409,3 @@ class RetryOnRpcErrorClientInterceptor(
                               request):
         return self._intercept_call(continuation, client_call_details,
                                     request)
-
-    def intercept_stream_unary(
-            self, continuation, client_call_details, request_iterator
-    ):
-        return self._intercept_call(continuation, client_call_details,
-                                    request_iterator)

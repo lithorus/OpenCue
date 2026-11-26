@@ -25,13 +25,12 @@ from builtins import map
 from collections import namedtuple
 import time
 
-import grpc
-
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
 
 import opencue_proto.job_pb2
+import opencue_proto.rpc
 import opencue
 import opencue.wrappers.group
 import opencue.wrappers.job
@@ -492,10 +491,10 @@ class CueJobMonitorTree(cuegui.AbstractTreeWidget.AbstractTreeWidget):
         except opencue.exception.CueException as e:
             list(map(logger.warning, cuegui.Utils.exceptionOutput(e)))
             return None
-        except grpc.RpcError as e:
+        except opencue_proto.rpc.RpcError as e:
             # pylint: disable=no-member
-            if hasattr(e, 'code') and e.code() in (grpc.StatusCode.CANCELLED,
-                                                   grpc.StatusCode.UNAVAILABLE):
+            if hasattr(e, 'code') and e.code() in (opencue_proto.rpc.StatusCode.CANCELLED,
+                                                   opencue_proto.rpc.StatusCode.UNAVAILABLE):
                 logger.warning("gRPC connection issue fetching job whiteboard: %s - "
                                "UI will retry on next update", e.details())
             else:

@@ -30,26 +30,25 @@ from concurrent import futures
 import time
 import sys
 
-import grpc
-
-import opencue_proto.report_pb2_grpc
+import opencue_proto.report_pb2
+from opencue_proto import rpc
 import rqd.rqconstants
 
 
 class RqdReportStaticServer(object):
 
     def __init__(self):
-        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        self.server = rpc.server(futures.ThreadPoolExecutor(max_workers=1))
         self.servicerName = 'RqdReportInterfaceServicer'
         self.servicer = None
         self.server.add_insecure_port('[::]:{0}'.format(rqd.rqconstants.CUEBOT_GRPC_PORT))
 
     def addServicers(self):
-        addFunc = getattr(
-            opencue_proto.report_pb2_grpc, 'add_{0}_to_server'.format(self.servicerName))
+        service_name = self.servicerName[:-len('Servicer')]
         servicerClass = globals()[self.servicerName]
         self.servicer = servicerClass()
-        addFunc(self.servicer, self.server)
+        self.server.add_service(
+            opencue_proto.report_pb2, service_name, self.servicer)
 
     def serve(self):
         self.addServicers()
@@ -70,7 +69,7 @@ class RqdReportStaticServer(object):
             self.server.stop(0)
 
 
-class RqdReportInterfaceServicer(opencue_proto.report_pb2_grpc.RqdReportInterfaceServicer):
+class RqdReportInterfaceServicer(object):
     """Test class implements RqdReportStatic interface.
        Received reports are stored in the variables listed below.
        Create as an object to connect.

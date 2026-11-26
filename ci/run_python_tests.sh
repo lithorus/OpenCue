@@ -21,6 +21,8 @@ else
   python -m pip install ./proto
 fi
 
+python -m pytest proto
+
 for package in pycue pyoutline cueadmin cueman cuesubmit rqd cuecmd cuenimby
 do
   PACKAGE_PATH="OPENCUE_${package^^}_PACKAGE_PATH"

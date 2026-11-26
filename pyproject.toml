@@ -2,6 +2,9 @@
 venvPath = "."
 venv = "venv"
 
+[tool.pylint.typecheck]
+ignored-classes = ["DynamicStub"]
+
 [tool.coverage.report]
 omit = [
     "shibokensupport/*",

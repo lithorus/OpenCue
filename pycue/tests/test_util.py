@@ -23,10 +23,10 @@ from builtins import range
 import unittest
 import uuid
 
-import grpc
 import mock
 
 from opencue_proto import job_pb2
+from opencue_proto import rpc
 import opencue.exception
 from opencue.wrappers.job import Job
 
@@ -41,29 +41,29 @@ class ProxyTests(unittest.TestCase):
     """proxy converts different types of entities to usable Ice proxies"""
 
     def testNotFoundExceptionParser(self):
-        response = grpc.RpcError()
-        response.code = lambda: grpc.StatusCode.NOT_FOUND
+        response = rpc.RpcError()
+        response.code = lambda: rpc.StatusCode.NOT_FOUND
         response.details = lambda: "testing not found"
         self.assertRaises(opencue.exception.EntityNotFoundException,
                           lambda: testRaise(response))
 
     def testExistsExceptionParser(self):
-        response = grpc.RpcError()
-        response.code = lambda: grpc.StatusCode.ALREADY_EXISTS
+        response = rpc.RpcError()
+        response.code = lambda: rpc.StatusCode.ALREADY_EXISTS
         response.details = lambda: "already exists"
         self.assertRaises(opencue.exception.EntityAlreadyExistsException,
                           lambda: testRaise(response))
 
     def testDeadlineExceptionParser(self):
-        response = grpc.RpcError()
-        response.code = lambda: grpc.StatusCode.DEADLINE_EXCEEDED
+        response = rpc.RpcError()
+        response.code = lambda: rpc.StatusCode.DEADLINE_EXCEEDED
         response.details = lambda: "deadline exceeded"
         self.assertRaises(opencue.exception.DeadlineExceededException,
                           lambda: testRaise(response))
 
     def testInternalExceptionParser(self):
-        response = grpc.RpcError()
-        response.code = lambda: grpc.StatusCode.INTERNAL
+        response = rpc.RpcError()
+        response.code = lambda: rpc.StatusCode.INTERNAL
         response.details = lambda: "Internal Error"
         self.assertRaises(opencue.exception.CueInternalErrorException,
                           lambda: testRaise(response))
@@ -71,8 +71,8 @@ class ProxyTests(unittest.TestCase):
     @mock.patch('uuid.uuid4')
     def testConnectionExceptionParser(self, mockUuid):
         with mock.patch('opencue.exception.getRetryCount', return_value=3):
-            response = grpc.RpcError()
-            response.code = lambda: grpc.StatusCode.UNAVAILABLE
+            response = rpc.RpcError()
+            response.code = lambda: rpc.StatusCode.UNAVAILABLE
             response.details = lambda: "Connection Error"
             self.assertRaises(opencue.exception.ConnectionException,
                               lambda: testRaise(response))
@@ -81,15 +81,15 @@ class ProxyTests(unittest.TestCase):
     @mock.patch('uuid.uuid4')
     def testConnectionExceptionZeroRetries(self, mockUuid):
         with mock.patch('opencue.exception.getRetryCount', return_value=0):
-            response = grpc.RpcError()
-            response.code = lambda: grpc.StatusCode.UNAVAILABLE
+            response = rpc.RpcError()
+            response.code = lambda: rpc.StatusCode.UNAVAILABLE
             response.details = lambda: "Connection Error"
             self.assertRaises(opencue.exception.ConnectionException,
                               lambda: testRaise(response))
         self.assertEqual(mockUuid.call_count, 1)
 
     def testUnknownExceptionParser(self):
-        response = grpc.RpcError()
+        response = rpc.RpcError()
         response.code = lambda: "unknown"
         response.details = lambda: "unknown"
         self.assertRaises(opencue.exception.CueException,

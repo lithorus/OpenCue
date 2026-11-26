@@ -9,6 +9,7 @@ name = "opencue_rqd"
 dynamic = ["version"]
 dependencies = [
     "opencue_proto",
+    "h2>=4.0.0",
     "psutil==5.9.8",
     "pynput==1.7.6",
     "future==1.0.0"

@@ -27,9 +27,9 @@ import math
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
-import grpc
 
 import FileSequence
+import opencue_proto.rpc
 from opencue_proto import job_pb2
 
 import cuegui.FrameMonitorTree
@@ -164,11 +164,11 @@ class FrameMonitor(QtWidgets.QWidget):
                 self.frameRangeSelection.default_select_size = self.frameSearchLimit // len(layers)
 
                 self.frameRangeSelection.setFrameRange([str(_min), str(_max)])
-            except grpc.RpcError as e:
+            except opencue_proto.rpc.RpcError as e:
                 # Handle gRPC connection errors gracefully
                 # pylint: disable=no-member
-                if hasattr(e, 'code') and e.code() in [grpc.StatusCode.CANCELLED,
-                                                         grpc.StatusCode.UNAVAILABLE]:
+                if hasattr(e, 'code') and e.code() in [opencue_proto.rpc.StatusCode.CANCELLED,
+                                                         opencue_proto.rpc.StatusCode.UNAVAILABLE]:
                     log.warning(
                         "gRPC connection interrupted while updating frame range filter, will retry")
                 else:
@@ -411,11 +411,11 @@ class FrameMonitor(QtWidgets.QWidget):
         if self.frameMonitorTree.getJob():
             try:
                 layers = [x.data.name for x in self.frameMonitorTree.getJob().getLayers()]
-            except grpc.RpcError as e:
+            except opencue_proto.rpc.RpcError as e:
                 # Handle gRPC connection errors gracefully
                 # pylint: disable=no-member
-                if hasattr(e, 'code') and e.code() in [grpc.StatusCode.CANCELLED,
-                                                         grpc.StatusCode.UNAVAILABLE]:
+                if hasattr(e, 'code') and e.code() in [opencue_proto.rpc.StatusCode.CANCELLED,
+                                                         opencue_proto.rpc.StatusCode.UNAVAILABLE]:
                     log.warning(
                         "gRPC connection interrupted while updating layer filter, will retry")
                 else:

@@ -14,8 +14,7 @@
 
 """Module for classes related to services."""
 
-import grpc
-
+from opencue_proto import rpc
 from opencue_proto import service_pb2
 from opencue.cuebot import Cuebot
 
@@ -63,9 +62,9 @@ class Service(object):
             response = Cuebot.getStub('service').GetService(
                 service_pb2.ServiceGetServiceRequest(name=name),
                 timeout=Cuebot.Timeout)
-        except grpc.RpcError as e:
+        except rpc.RpcError as e:
             # pylint: disable=no-member
-            if e.code() == grpc.StatusCode.NOT_FOUND:
+            if e.code() == rpc.StatusCode.NOT_FOUND:
                 return None
             # pylint: enable=no-member
             raise e

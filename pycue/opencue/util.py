@@ -25,23 +25,22 @@ import logging
 import os
 import time
 
-import grpc
-
+from opencue_proto import rpc
 import opencue
 
 logger = logging.getLogger('opencue')
 
 
 def grpcExceptionParser(grpcFunc):
-    """Decorator to wrap functions making GRPC calls.
-    Attempts to throw the appropriate exception based on grpc status code."""
+    """Decorator to wrap functions making RPC calls.
+    Attempts to throw the appropriate exception based on RPC status code."""
     def _decorator(*args, **kwargs):
         triesRemaining = opencue.exception.getRetryCount() + 1
         while triesRemaining > 0:
             triesRemaining -= 1
             try:
                 return grpcFunc(*args, **kwargs)
-            except grpc.RpcError as exc:
+            except rpc.RpcError as exc:
                 # pylint: disable=no-member
                 code = exc.code()
                 details = exc.details() or "No details found. Check server logs."
