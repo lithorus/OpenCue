@@ -261,6 +261,10 @@ class _StreamRefusedBeforeResponse(Exception):
     """Internal error when a pooled connection stream is refused before processing."""
 
 
+class _StaleConnectionError(Exception):
+    """Internal error when a reused connection is reset/dropped before any response."""
+
+
 class _Http2ClientConnection(object):
     """Single synchronous HTTP/2 client connection managed via h2."""
 
@@ -279,6 +283,25 @@ class _Http2ClientConnection(object):
         self._conn = h2.connection.H2Connection(config=config)
         self._conn.initiate_connection()
         self._flush()
+
+    def is_readable_or_closed(self):
+        """Checks if connection has incoming data or EOF without blocking."""
+        if self.closed:
+            return True
+        try:
+            self._sock.setblocking(False)
+            buf = self._sock.recv(1, socket.MSG_PEEK)
+            self._sock.setblocking(True)
+            if buf == b"":
+                self.closed = True
+                return True
+            return False
+        except (BlockingIOError, socket.error):
+            try:
+                self._sock.setblocking(True)
+            except OSError:
+                pass
+            return False
 
     def _flush(self):
         out = self._conn.data_to_send()
@@ -364,8 +387,11 @@ class _Http2ClientConnection(object):
                     if event.data:
                         cumulative_recv_len += len(event.data)
                         if max_recv_length and cumulative_recv_len > (max_recv_length + 5):
-                            self._conn.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
-                            self._flush()
+                            try:
+                                self._conn.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
+                                self._flush()
+                            except (OSError, h2.exceptions.H2Error):
+                                pass
                             raise RpcError(
                                 StatusCode.RESOURCE_EXHAUSTED,
                                 "Received message exceeds limit of %d bytes" % max_recv_length,
@@ -412,12 +438,18 @@ class _Http2ClientConnection(object):
                 chunk = framed[offset:offset + chunk_size]
                 end = (offset + chunk_size) >= total
                 self._conn.send_data(stream_id, chunk, end_stream=end)
-                self._flush()
+                try:
+                    self._flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    break
                 offset += chunk_size
 
             if total == 0 and not stream_ended:
                 self._conn.end_stream(stream_id)
-                self._flush()
+                try:
+                    self._flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
 
             while not stream_ended:
                 _process_events(self._read_events(deadline))
@@ -427,12 +459,19 @@ class _Http2ClientConnection(object):
             raise
         except (EOFError, BrokenPipeError, ConnectionResetError, h2.exceptions.H2Error) as exc:
             self.closed = True
-            raise RpcError(StatusCode.UNAVAILABLE, str(exc))
+            if (trailing_headers or "grpc-status" in initial_headers) and not stream_ended:
+                stream_ended = True
+            elif reused and not received_any:
+                raise _StaleConnectionError(str(exc))
+            else:
+                raise RpcError(StatusCode.UNAVAILABLE, str(exc))
         except socket.timeout:
             self.closed = True
             raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
         except OSError as exc:
             self.closed = True
+            if reused and not received_any:
+                raise _StaleConnectionError(str(exc))
             raise RpcError(StatusCode.UNAVAILABLE, str(exc))
 
         if (stream_reset is not None and not trailing_headers
@@ -537,9 +576,10 @@ class Http2Channel(object):
                 raise RpcError(StatusCode.UNAVAILABLE, "Channel is closed")
             while self._pool:
                 conn = self._pool.pop()
-                if not conn.closed:
+                if not conn.closed and not conn.is_readable_or_closed():
                     self._active.add(conn)
                     return conn, True
+                conn.close()
         try:
             conn = _Http2ClientConnection(self._host, self._port, deadline=deadline)
         except socket.timeout:
@@ -578,7 +618,7 @@ class Http2Channel(object):
                     max_recv_length=self._max_recv_length,
                     reused=reused,
                 )
-            except _StreamRefusedBeforeResponse:
+            except (_StreamRefusedBeforeResponse, _StaleConnectionError):
                 conn.close()
                 if deadline is not None and (deadline - time.monotonic()) <= 0:
                     raise RpcError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded")
